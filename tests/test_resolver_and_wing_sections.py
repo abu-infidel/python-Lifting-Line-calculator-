@@ -54,7 +54,7 @@ def test_missing_six_series_falls_back_to_a_flagged_approximation(library):
     r = AirfoilResolver(library).resolve("64A010")
     assert r.approximate and "APPROXIMATE" in r.note and "not found in the airfoil library" in r.note
     no_lib = AirfoilResolver().resolve("64A010")
-    assert no_lib.approximate and "no airfoil library is set" in no_lib.note
+    assert no_lib.approximate and "none has been chosen" in no_lib.note
 
 
 def test_ambiguous_library_match_is_reported_in_the_note(library):
@@ -176,6 +176,24 @@ def test_overrides_replace_the_requested_factors_of_one_section_only():
     assert co.cd[0] == pytest.approx(0.012 + 0.0076 * co.cl[0] ** 2, rel=1e-6)
     assert isinstance(m.aeros[0], OverriddenAero) and not isinstance(m.aeros[1], OverriddenAero)
     assert not SectionOverride().active and ov.active
+
+
+def test_an_override_that_repeats_the_engine_values_leaves_the_drag_unchanged():
+    """The parabolic part of the drag must not be counted twice when only some factors are overridden."""
+    wing = Wing.rectangular(10.0, 1.0)
+    base = BuiltinAero(naca4.naca4_airfoil("2412"))
+    re = np.full(1, 2e6)
+    lin = base.linear(re)
+    same = SectionOverride(a0=float(lin.a0[0]))
+    m = WingSectionModel(wing, [base, base], overrides=[same, None])
+    for deg in (0.0, 3.0, 6.0):
+        al = np.full(1, lin.alpha_L0[0] + math.radians(deg))
+        cd_ov = m.evaluate(np.array([0.0]), al, re).cd[0]
+        cd_base = base.coefficients(al, re)[1][0]
+        # the override polar is a parabola about zero lift, the engine's has its vertex at cl0 != 0: close, not equal
+        assert cd_ov == pytest.approx(cd_base, rel=0.25)
+    al = np.full(1, lin.alpha_L0[0] + math.radians(3.0))
+    assert m.evaluate(np.array([0.0]), al, re).cd[0] == pytest.approx(base.coefficients(al, re)[1][0], rel=1e-9)
 
 
 def test_override_polar_saturates_at_the_given_cl_max():

@@ -123,7 +123,7 @@ class AirfoilResolver:
                     raise AirfoilNotFound(f"cannot read library file {entry.path}: {exc}") from exc
                 return Resolution(key, af.with_name(code.name), f"library file {entry.path.name}", False, tuple(ties), note, code)
         af = naca6_fallback_airfoil(code)
-        where = "not found in the airfoil library" if self.library is not None else "no airfoil library is set"
+        where = "was not found in the airfoil library" if self.library is not None else "needs the airfoil library, and none has been chosen"
         return Resolution(
             key,
             af,

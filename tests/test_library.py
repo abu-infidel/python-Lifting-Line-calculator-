@@ -1,6 +1,5 @@
 """Library indexing / NACA-code resolution against synthetic fixtures that mimic UIUC naming."""
 
-import numpy as np
 import pytest
 
 from liftingline.airfoil import naca4, naca5, naca6

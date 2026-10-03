@@ -94,7 +94,6 @@ def main() -> int:
     print("sampling NeuralFoil (training grid) ...")
     tr = sample(TRAIN_M, TRAIN_T, TRAIN_RE)
     lift = tr["Re"] >= LIFT_RE_FLOOR
-    cambered = np.abs(tr["m"]) > 0
 
     spec: dict[str, dict] = {}
     # (name, features, target, mask)
@@ -141,7 +140,7 @@ def main() -> int:
     lines += ["}", f"STALL_DELTA_DEG = {delta:.3f}", f"K_CD = {k_cd:.5f}", ""]
     OUT.write_text("\n".join(lines), encoding="utf-8")
     print("\n".join(lines[:16]))
-    print(f"fits: " + ", ".join(f"{k} (rms {v['rms']:.3f}, R2 {v['r2']:.2f})" for k, v in spec.items()))
+    print("fits: " + ", ".join(f"{k} (rms {v['rms']:.3f}, R2 {v['r2']:.2f})" for k, v in spec.items()))
     print(f"STALL_DELTA_DEG={delta:.3f}  K_CD={k_cd:.5f}")
     print(f"written {OUT}")
     return 0

@@ -38,6 +38,15 @@ class SectionOverride:
         return any(v is not None for v in (self.a0, self.alpha_L0, self.cm_c4, self.cl_max, self.cd0))
 
 
+def reference_cd0(base: AirfoilAero, re: np.ndarray) -> np.ndarray:
+    """The ``cd0`` of the override model: the engine's profile drag about 3 degrees above its zero-lift angle
+    with the parabolic ``K cl^2`` part taken out (the override polar adds that part back at every angle)."""
+    re = np.asarray(re, dtype=float)
+    alpha = base.linear(re).alpha_L0 + math.radians(3.0)
+    cl, cd = base.coefficients(alpha, re)[:2]
+    return np.maximum(cd - cal.K_CD * cl**2, 0.2 * cd)
+
+
 class OverriddenAero:
     """An airfoil whose factors the user has overridden: smooth parametric polar built on the base data."""
 
@@ -64,9 +73,8 @@ class OverriddenAero:
         cl, dcl_du, sat, excess = saturate(u, lin.cl_max, 0.8 * lin.cl_max)
         if self.ov.cd0 is not None:
             cd0 = np.full_like(alpha, self.ov.cd0)
-        else:  # the engine's own drag at a typical operating point
-            base_lin = self.base.linear(re)
-            cd0 = self.base.coefficients(base_lin.alpha_L0 + math.radians(3.0), re)[1]
+        else:  # the engine's own drag at a typical operating point, without its parabolic part
+            cd0 = reference_cd0(self.base, re)
         cd = cd0 + cal.K_CD * cl**2 + 0.25 * excess**2
         return cl, cd, np.asarray(lin.cm_c4, dtype=float), lin.a0 * dcl_du
 

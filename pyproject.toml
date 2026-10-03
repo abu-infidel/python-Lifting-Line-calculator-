@@ -28,6 +28,9 @@ include = ["liftingline*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+filterwarnings = [
+    "ignore:.*AA_UseHighDpiPixmaps.*:DeprecationWarning",
+]
 markers = [
     "gui: needs Qt (runs with QT_QPA_PLATFORM=offscreen)",
     "neuralfoil: needs the optional NeuralFoil engine",

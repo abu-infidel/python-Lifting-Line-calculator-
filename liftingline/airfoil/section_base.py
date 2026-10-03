@@ -14,11 +14,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from functools import cached_property
 from typing import Protocol, runtime_checkable
 
 import numpy as np
-from scipy.interpolate import CubicSpline, PchipInterpolator
+from scipy.interpolate import CubicSpline
 
 from ..core.section import LinearParams
 from .geometry import Airfoil

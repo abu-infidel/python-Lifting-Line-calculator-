@@ -73,7 +73,7 @@ class HealthReport:
             f"files indexed        : {self.total}",
             f"parsed successfully  : {self.parsed_ok}",
             f"failed               : {len(self.failures)}",
-            f"coordinate formats   : " + ", ".join(f"{k} {v}" for k, v in sorted(self.formats.items())),
+            "coordinate formats   : " + ", ".join(f"{k} {v}" for k, v in sorted(self.formats.items())),
             f"normalised/repaired  : {self.repaired}",
             f"NACA designation seen: {self.with_naca_code}",
         ]

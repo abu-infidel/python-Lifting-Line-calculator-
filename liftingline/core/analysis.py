@@ -5,9 +5,8 @@ The GUI, sweeps, trim solver and validation suite all go through :func:`run`.
 
 from __future__ import annotations
 
-import math
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -15,7 +14,7 @@ from .corrections import PG_MACH_LIMIT, CompressibleSection
 from .flow import FlowCondition
 from .forces import LoadDistribution, Totals, compute_totals
 from .section import SectionModel
-from .solver_classical import ClassicalSolution, ControlEffects, build_load_classical, solve_classical
+from .solver_classical import ControlEffects, build_load_classical, solve_classical
 from .wing import Wing
 
 SOLVER_AUTO = "auto"
