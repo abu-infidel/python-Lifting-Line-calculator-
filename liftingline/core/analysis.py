@@ -47,7 +47,7 @@ class AnalysisRequest:
     section: SectionModel
     solver: str = SOLVER_AUTO
     n_terms: int = 80  # Fourier terms (classical solver)
-    nonlinear: bool = False  # use the full section polars instead of (a0, alpha_L0)
+    nonlinear: bool | None = None  # full section polars instead of (a0, alpha_L0); None = auto (on for real polars)
     compressibility: bool = True  # Prandtl-Glauert correction of section lift slope and moment
     ref: MomentReference = field(default_factory=MomentReference)
     extra_cd0: float = 0.0  # additional parasite drag coefficient (fuselage, tail, ...) on S
@@ -94,6 +94,10 @@ def run(req: AnalysisRequest) -> AnalysisResult:
             "wave drag is not modelled."
         )
     section = CompressibleSection(req.section, flow.mach) if req.compressibility else req.section
+    nonlinear = bool(req.nonlinear) if req.nonlinear is not None else bool(getattr(req.section, "has_polars", False))
+    info["nonlinear"] = nonlinear
+    for note in getattr(req.section, "notes", ()):
+        warnings.append(note)
 
     reasons = needs_numerical_solver(req)
     solver = req.solver
@@ -114,7 +118,7 @@ def run(req: AnalysisRequest) -> AnalysisResult:
         solution, load = run_numerical(req, section, warnings, info)
     else:
         solution = solve_classical(
-            wing, flow, section, n_terms=req.n_terms, nonlinear=req.nonlinear, controls=req.controls
+            wing, flow, section, n_terms=req.n_terms, nonlinear=nonlinear, controls=req.controls
         )
         if not solution.converged:
             warnings.append(
@@ -127,8 +131,9 @@ def run(req: AnalysisRequest) -> AnalysisResult:
     totals = compute_totals(load, wing, flow, x_ref=x_ref, z_ref=z_ref, extra_cd0=req.extra_cd0)
 
     if solver == SOLVER_CLASSICAL and req.convergence_check:
-        _check_term_convergence(req, section, totals, warnings, info)
+        _check_term_convergence(req, section, nonlinear, totals, warnings, info)
     _validity_warnings(req, load, totals, warnings)
+    _confidence_warning(req, load, warnings, info)
 
     info["solve_time_s"] = time.perf_counter() - t0
     info["mach"] = flow.mach
@@ -139,10 +144,10 @@ def run(req: AnalysisRequest) -> AnalysisResult:
 
 
 # ---------------------------------------------------------------------------- checks
-def _check_term_convergence(req, section, totals: Totals, warnings: list[str], info: dict) -> None:
+def _check_term_convergence(req, section, nonlinear: bool, totals: Totals, warnings: list[str], info: dict) -> None:
     """Re-solve with twice the Fourier terms and report the change in CL and CDi."""
     sol2 = solve_classical(
-        req.wing, req.flow, section, n_terms=2 * req.n_terms, nonlinear=req.nonlinear, controls=req.controls
+        req.wing, req.flow, section, n_terms=2 * req.n_terms, nonlinear=nonlinear, controls=req.controls
     )
     load2 = build_load_classical(sol2, req.wing, req.flow, section, controls=req.controls)
     t2 = compute_totals(load2, req.wing, req.flow, x_ref=0.0, extra_cd0=req.extra_cd0)
@@ -181,3 +186,22 @@ def _validity_warnings(req: AnalysisRequest, load: LoadDistribution, totals: Tot
             )
         elif worst > 0.9:
             warnings.append(f"Close to stall: highest local cl is {worst:.0%} of cl_max.")
+
+
+def _confidence_warning(req: AnalysisRequest, load: LoadDistribution, warnings: list[str], info: dict) -> None:
+    """Surface the section engine's own confidence (NeuralFoil) where it is low."""
+    conf_fn = getattr(req.section, "confidence", None)
+    if conf_fn is None:
+        return
+    inner = np.abs(load.y) < 0.95 * req.wing.half_span  # the last few percent of span carry almost no load
+    conf = conf_fn(np.abs(load.y[inner]), load.alpha_eff[inner], load.re[inner])
+    if conf is None:
+        return
+    worst = float(np.min(conf))
+    info["section_confidence_min"] = worst
+    if worst < 0.5:
+        where = float(np.abs(load.y[inner][int(np.argmin(conf))]))
+        warnings.append(
+            f"Low section-data confidence ({worst:.2f}) near |y| = {where:.2f} m: the airfoil is at an extreme "
+            "angle of attack or Reynolds number for the section engine; treat drag and stall results with care."
+        )
