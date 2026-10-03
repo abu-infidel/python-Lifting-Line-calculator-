@@ -113,9 +113,9 @@ def run(req: AnalysisRequest) -> AnalysisResult:
     x_ref, z_ref = req.ref.resolve(wing)
 
     if solver == SOLVER_NUMERICAL:
-        from .solver_numerical import run_numerical  # imported lazily (milestone M4)
+        from .solver_numerical import run_numerical
 
-        solution, load = run_numerical(req, section, warnings, info)
+        solution, load = run_numerical(req, section, nonlinear, warnings, info)
     else:
         solution = solve_classical(
             wing, flow, section, n_terms=req.n_terms, nonlinear=nonlinear, controls=req.controls
@@ -130,8 +130,11 @@ def run(req: AnalysisRequest) -> AnalysisResult:
 
     totals = compute_totals(load, wing, flow, x_ref=x_ref, z_ref=z_ref, extra_cd0=req.extra_cd0)
 
-    if solver == SOLVER_CLASSICAL and req.convergence_check:
-        _check_term_convergence(req, section, nonlinear, totals, warnings, info)
+    if req.convergence_check:
+        if solver == SOLVER_CLASSICAL:
+            _check_term_convergence(req, section, nonlinear, totals, warnings, info)
+        else:
+            _check_panel_convergence(req, section, nonlinear, totals, warnings, info)
     _validity_warnings(req, load, totals, warnings)
     _confidence_warning(req, load, warnings, info)
 
@@ -162,6 +165,24 @@ def _check_term_convergence(req, section, nonlinear: bool, totals: Totals, warni
         )
 
 
+def _check_panel_convergence(req, section, nonlinear: bool, totals: Totals, warnings: list[str], info: dict) -> None:
+    """Re-solve with twice the elements and report the change in CL and CDi (numerical solver)."""
+    from .solver_numerical import build_load_numerical, solve_numerical
+
+    kw = dict(nonlinear=nonlinear, controls=req.controls, ground_height=req.ground_height)
+    sol2 = solve_numerical(req.wing, req.flow, section, n_panels=2 * req.n_panels, **kw)
+    load2 = build_load_numerical(sol2, req.wing, req.flow, section, controls=req.controls, nonlinear=nonlinear)
+    t2 = compute_totals(load2, req.wing, req.flow, x_ref=0.0, extra_cd0=req.extra_cd0)
+    dCL = abs(t2.CL - totals.CL) / max(abs(t2.CL), 1e-12)
+    dCDi = abs(t2.CD_induced - totals.CD_induced) / max(abs(t2.CD_induced), 1e-12)
+    info["convergence_dCL"], info["convergence_dCDi"] = dCL, dCDi
+    if dCL > 1e-2 or dCDi > 4e-2:
+        warnings.append(
+            f"Result not converged in the number of elements (CL changes {dCL:.2%}, CDi {dCDi:.2%} when doubling "
+            f"{req.n_panels} elements per half-wing); increase the element count."
+        )
+
+
 def _validity_warnings(req: AnalysisRequest, load: LoadDistribution, totals: Totals, warnings: list[str]) -> None:
     wing = req.wing
     if wing.aspect_ratio < 4.0:
@@ -169,10 +190,22 @@ def _validity_warnings(req: AnalysisRequest, load: LoadDistribution, totals: Tot
             f"Low aspect ratio (AR = {wing.aspect_ratio:.2f}): lifting-line theory over-predicts lift and loses "
             "accuracy below AR of about 4."
         )
-    if wing.max_abs_sweep_c4_deg > 30.0:
+    sweep = wing.max_abs_sweep_c4_deg
+    if sweep > 20.0:
         warnings.append(
-            f"Quarter-chord sweep of {wing.max_abs_sweep_c4_deg:.0f} deg is beyond the range where lifting-line "
-            "theory is dependable (about 30 deg)."
+            f"Quarter-chord sweep of {sweep:.0f} deg: lifting-line theory is least reliable on swept wings. Against a "
+            "vortex-lattice method the loss of lift due to sweep is over-estimated by about 2-3 % at 30 deg and 4-6 % at "
+            "45 deg, the induced-drag factor is within about 10 %, and the rolling moment due to sideslip is "
+            "over-predicted by 20-30 %. Above 45 deg the results are not reliable."
+        )
+    if req.ground_height is not None and req.ground_height < 2.0 * wing.mac:
+        h_c = req.ground_height / wing.mac
+        loss = "more than 15 %" if h_c < 0.68 else f"about {7.0 / h_c**2:.0f} %"
+        warnings.append(
+            f"Ground effect at {req.ground_height:.2f} m ({h_c:.1f} mean chords): a lifting line captures the "
+            "three-dimensional (image-vortex) part of ground effect but not the chordwise two-dimensional part, so "
+            f"the lift increase is under-predicted by {loss} of CL (roughly 7 % x (chord/height)^2 against a "
+            "vortex-lattice method); below one chord the result is unreliable."
         )
     margin = load.cl_margin
     finite = np.isfinite(load.cl_max)
