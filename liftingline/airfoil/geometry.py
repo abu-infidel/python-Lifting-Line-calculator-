@@ -22,6 +22,16 @@ def cosine_spacing(n: int) -> np.ndarray:
     return 0.5 * (1.0 - np.cos(beta))
 
 
+def panel_spacing(n: int) -> np.ndarray:
+    """``n + 1`` stations from 0 to 1 for panel methods: clustered at the leading edge, with
+    moderate (not vanishing) panels at the trailing edge. Full cosine spacing makes the
+    trailing-edge panels tiny next to their neighbours, which stalls the convergence of the Kutta
+    condition (measured: a -0.45 % lift-slope error that does not shrink with N); this blend of
+    cosine and leading-edge-only spacing converges at first order."""
+    u = np.linspace(0.0, 1.0, n + 1)
+    return 0.5 * (0.5 * (1.0 - np.cos(math.pi * u))) + 0.5 * (1.0 - np.cos(0.5 * math.pi * u))
+
+
 class GeometryError(ValueError):
     """The coordinates cannot describe an airfoil."""
 
@@ -31,8 +41,20 @@ def _signed_area(xy: np.ndarray) -> float:
     return 0.5 * float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
 
 
+#: input rotated by more than this (degrees, nose -> trailing-edge line vs the x axis) is re-aligned
+TILT_TOLERANCE_DEG = 1.0
+
+
 def normalize_coordinates(xy: np.ndarray) -> tuple[np.ndarray, list[str]]:
-    """Bring raw airfoil coordinates to the canonical form; returns (coords, notes)."""
+    """Bring raw airfoil coordinates to the canonical form; returns (coords, notes).
+
+    The result has the nose at ``x = 0``, the trailing-edge mid-point at ``x = 1`` and Selig
+    (counter-clockwise, upper surface first) ordering. **Axes are respected**: if the nose->TE line
+    is within ``TILT_TOLERANCE_DEG`` of the file's x axis the data is only translated and scaled, so
+    the angle of attack keeps the meaning the file's author gave it (a cambered NACA nose sits a
+    fraction of a degree above the nominal leading edge; rotating that away would make "NACA 2412"
+    and ``naca2412.dat`` differ). Clearly rotated data is rotated back to the nose->TE chord line.
+    """
     pts = np.asarray(xy, dtype=float)
     if pts.ndim != 2 or pts.shape[1] != 2:
         raise GeometryError("airfoil coordinates must be an (n, 2) array")
@@ -54,11 +76,14 @@ def normalize_coordinates(xy: np.ndarray) -> tuple[np.ndarray, list[str]]:
     if chord <= 0.0:
         raise GeometryError("degenerate airfoil (zero chord)")
     ang = math.atan2(chord_vec[1], chord_vec[0])
-    c, s = math.cos(-ang), math.sin(-ang)
-    rot = np.array([[c, -s], [s, c]])
-    out = ((pts - le) @ rot.T) / chord
-    if abs(math.degrees(ang)) > 0.05:
+    if abs(math.degrees(ang)) > TILT_TOLERANCE_DEG:
+        c, s = math.cos(-ang), math.sin(-ang)
+        out = ((pts - le) @ np.array([[c, -s], [s, c]]).T) / chord
         notes.append(f"rotated by {math.degrees(-ang):+.2f} deg so the chord line lies along x")
+    else:
+        extent = float(chord_vec[0])  # keep the file's axes; only translate (nose -> x = 0, TE -> y = 0) and scale
+        out = (pts - np.array([le[0], te[1]])) / extent
+        chord = extent
     if abs(chord - 1.0) > 5e-3:
         notes.append(f"scaled from chord length {chord:.4g} to 1")
 
@@ -71,7 +96,7 @@ def normalize_coordinates(xy: np.ndarray) -> tuple[np.ndarray, list[str]]:
     if _signed_area(out) < 0.0:
         out = out[::-1].copy()
         notes.append("reversed point order (clockwise input)")
-    out = out - out[int(np.argmin(out[:, 0]))]  # nose (min-x point) exactly at the origin
+    out[:, 0] -= out[:, 0].min()  # nose exactly at x = 0
     return out, notes
 
 
@@ -185,11 +210,15 @@ class Airfoil:
         return float(np.hypot(*(self.coords[0] - self.coords[-1])))
 
     # ------------------------------------------------------------------ resampling
-    def resample(self, n_per_surface: int = 80, *, close_te: bool = False) -> "Airfoil":
-        """Cosine-spaced copy with ``2 n + 1`` points (upper and lower share the nose point);
-        optionally closes a small trailing-edge gap."""
+    def resample(self, n_per_surface: int = 80, *, close_te: bool = False, spacing: str = "cosine") -> "Airfoil":
+        """Resampled copy with ``2 n + 1`` points (upper and lower share the nose point).
+
+        ``spacing`` is ``"cosine"`` (clustered at both ends) or ``"panel"`` (see
+        :func:`panel_spacing`, used by the panel method). Optionally closes a small
+        trailing-edge gap."""
         x0 = self._x0
-        x = x0 + (1.0 - x0) * cosine_spacing(n_per_surface)
+        frac = panel_spacing(n_per_surface) if spacing == "panel" else cosine_spacing(n_per_surface)
+        x = x0 + (1.0 - x0) * frac
         yu, yl = self.y_upper(x), self.y_lower(x)
         if close_te:
             mid = 0.5 * (yu[-1] + yl[-1])
