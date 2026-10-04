@@ -324,6 +324,14 @@ class WingPanel(QWidget):
     def problems(self) -> list[str]:
         return self.table.problems() if self._spec.mode == MODE_SECTIONS else []
 
+    def set_table_rows(self, rows: list[dict]) -> None:
+        """Switch to the free section table with these rows (used by the ideal-twist tool)."""
+        self._spec.mode = MODE_SECTIONS
+        self._spec.sections = copy.deepcopy(rows)
+        self._refresh_all()
+        self.sections_changed.emit()
+        self.changed.emit()
+
     # ======================================================================= helpers
     def _chosen(self) -> set[str]:
         """The planform fields that are inputs for the current ``define_by`` (the others are results)."""

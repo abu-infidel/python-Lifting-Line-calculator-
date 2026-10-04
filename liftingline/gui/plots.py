@@ -12,6 +12,7 @@ from matplotlib.figure import Figure
 from ..airfoil.geometry import Airfoil
 from ..core import units
 from ..core.analysis import AnalysisResult
+from ..core.forces import wind_axes
 from .theme import Theme, current_theme
 
 
@@ -41,14 +42,20 @@ def _length(system: str):
 
 
 # ================================================================================ planform
-def _loading(result: AnalysisResult):
-    """(y sorted, c cl, elliptic c cl of the same total lift) of a result, SI."""
+def lift_loading(result: AnalysisResult):
+    """(y sorted, lift per unit span / q, elliptic distribution of the same total lift), SI.
+
+    ``l'/q = F_lift / (q width)`` integrates to ``S CL`` for every wing; for an unswept wing it equals ``c cl``. (For a
+    swept wing the section lift coefficient ``cl`` refers to the flow normal to the quarter-chord line, so ``c cl`` would
+    not sum to the wing's lift.)
+    """
     load, t = result.load, result.totals
     order = np.argsort(load.y)
     y = load.y[order]
-    ccl = load.chord[order] * load.cl[order]
+    _, _, e_l = wind_axes(math.radians(t.alpha_deg), math.radians(t.beta_deg))
+    lprime = ((load.force_kj + load.force_profile)[order] @ e_l) / (t.q * load.width[order])
     ell = 4.0 * t.S * t.CL / (math.pi * t.b) * np.sqrt(np.clip(1.0 - (2.0 * y / t.b) ** 2, 0.0, None))
-    return y, ccl, ell
+    return y, lprime, ell
 
 
 def plot_planform(fig: Figure, result: AnalysisResult | None, wing, system: str, theme: Theme) -> None:
@@ -133,10 +140,10 @@ def plot_planform(fig: Figure, result: AnalysisResult | None, wing, system: str,
         cb.outline.set_edgecolor(theme.grid)
 
     if axl is not None:
-        yl, ccl, ell = _loading(result)
-        axl.plot(L(yl), L(ccl), color=theme.series[0], lw=1.6, label="this wing")
+        yl, lp, ell = lift_loading(result)
+        axl.plot(L(yl), L(lp), color=theme.series[0], lw=1.6, label="this wing")
         axl.plot(L(yl), L(ell), "--", color=theme.series[3], lw=1.2, label="elliptic, same lift")
-        axl.set_ylabel(f"c cl [{unit}]", fontsize=8)
+        axl.set_ylabel(f"l'/q [{unit}]", fontsize=8)
         axl.set_title(f"Lift loading (span efficiency e = {result.totals.e:.3f})", fontsize=9)
         leg2 = axl.legend(fontsize=7, frameon=False, loc="lower center")
         for t in leg2.get_texts():
@@ -184,12 +191,11 @@ def plot_spanwise(fig: Figure, result: AnalysisResult, system: str, theme: Theme
     ax.legend(fontsize=7, frameon=False, labelcolor=theme.muted)
 
     ax = axes[0, 1]
-    ccl = load.chord[order] * load.cl[order]
-    ell = 4.0 * t.S * t.CL / (math.pi * t.b) * np.sqrt(np.clip(1.0 - (2.0 * load.y[order] / t.b) ** 2, 0.0, None))
-    ax.plot(y, L(ccl), color=c[0], lw=1.6, label="c cl (this wing)")
+    _y, lp, ell = lift_loading(result)
+    ax.plot(y, L(lp), color=c[0], lw=1.6, label="lift per span (this wing)")
     ax.plot(y, L(ell), "--", color=c[3], lw=1.2, label="elliptic, same lift")
     ax.set_title(f"Lift loading (span efficiency e = {t.e:.3f})", fontsize=9)
-    ax.set_ylabel(f"c cl [{unit}]", fontsize=8)
+    ax.set_ylabel(f"l'/q [{unit}]", fontsize=8)
     ax.legend(fontsize=7, frameon=False, labelcolor=theme.muted)
 
     ax = axes[0, 2]
@@ -260,6 +266,92 @@ def plot_airfoils(
     leg = ax.legend(loc="lower right", fontsize=8, frameon=False)
     for tx in leg.get_texts():
         tx.set_color(theme.muted)
+
+
+# ================================================================================== compare
+def plot_compare(fig: Figure, snapshots, theme: Theme, system: str) -> None:
+    """Spanwise distributions of several pinned results on top of each other."""
+    fig.clear()
+    fig.set_facecolor(theme.bg)
+    if not snapshots:
+        message(fig, "Pin results to compare them.", theme)
+        return
+    unit, L = _length(system)
+    axes = fig.subplots(2, 2).ravel()
+    titles = ("Section lift coefficient cl", f"Lift per span l'/q [{unit}]", "Induced angle of attack [deg]", "Section drag cd")
+    for ax, title in zip(axes, titles):
+        style_axes(ax, theme)
+        ax.set_title(title, fontsize=9)
+    for i, snap in enumerate(snapshots):
+        col = theme.series[i % len(theme.series)]
+        load = snap.result.load
+        o = np.argsort(load.y)
+        y = L(load.y[o])
+        axes[0].plot(y, load.cl[o], color=col, lw=1.5, label=snap.name)
+        axes[1].plot(y, L(lift_loading(snap.result)[1]), color=col, lw=1.5)
+        axes[2].plot(y, np.degrees(load.alpha_induced[o]), color=col, lw=1.5)
+        axes[3].plot(y, load.cd[o], color=col, lw=1.5)
+    for ax in axes[2:]:
+        ax.set_xlabel(f"y [{unit}]", fontsize=8)
+    leg = axes[0].legend(fontsize=7, frameon=False, loc="lower center")
+    for t in leg.get_texts():
+        t.set_color(theme.muted)
+
+
+# =================================================================================== sweeps
+_SWEEP_PANELS = {
+    "alpha": (("CL", "Lift coefficient CL"), ("polar", "Drag polar: CD against CL"), ("L_over_D", "Lift-to-drag ratio L/D"), ("Cm", "Pitching moment Cm")),
+    "speed": (("L", "Lift"), ("D", "Drag"), ("L_over_D", "Lift-to-drag ratio L/D"), ("CL", "Lift coefficient CL")),
+    "altitude": (("L", "Lift"), ("D", "Drag"), ("L_over_D", "Lift-to-drag ratio L/D"), ("CL", "Lift coefficient CL")),
+    "beta": (("CL", "Lift coefficient CL"), ("C_roll", "Rolling moment Cl"), ("C_yaw", "Yawing moment Cn"), ("CY", "Side force CY")),
+    "deflection": (("CL", "Lift coefficient CL"), ("Cm", "Pitching moment Cm"), ("C_roll", "Rolling moment Cl"), ("C_yaw", "Yawing moment Cn")),
+}
+
+
+def sweep_axis(sweep_variable: str, system: str):
+    """(label, converter from the sweep's native values to display units)."""
+    if sweep_variable == "speed":
+        unit = "m/s" if system == "SI" else "kt"
+        return f"airspeed [{unit}]", (lambda v: units.from_si("speed", np.asarray(v, dtype=float), unit))
+    if sweep_variable == "altitude":
+        unit = "m" if system == "SI" else "ft"
+        return f"altitude [{unit}]", (lambda v: units.from_si("length", np.asarray(v, dtype=float), unit))
+    labels = {"alpha": "angle of attack [deg]", "beta": "sideslip angle [deg]", "deflection": "control deflection [deg]"}
+    return labels[sweep_variable], (lambda v: np.asarray(v, dtype=float))
+
+
+def plot_sweep(fig: Figure, sweep, theme: Theme, system: str = "SI", current: float | None = None, stall=None) -> None:
+    """Four panels of a parameter sweep; hollow markers are points where the solver did not fully converge."""
+    fig.clear()
+    fig.set_facecolor(theme.bg)
+    axes = fig.subplots(2, 2).ravel()
+    xlabel, conv = sweep_axis(sweep.variable, system)
+    x = conv(sweep.values)
+    good = sweep.converged
+    uF = units.display_unit(system, "force")
+    for ax, (col, title) in zip(axes, _SWEEP_PANELS[sweep.variable]):
+        style_axes(ax, theme)
+        if col == "polar":
+            xs, ys = sweep.column("CL"), sweep.column("CD")
+            ax.set_xlabel("CL", fontsize=8)
+            ax.set_ylabel("CD", fontsize=8)
+        else:
+            xs, ys = x, sweep.column(col)
+            if col in ("L", "D"):
+                ys = units.from_si("force", ys, uF)
+                title = f"{title} [{uF}]"
+            ax.set_xlabel(xlabel, fontsize=8)
+        ax.plot(xs, ys, "-", color=theme.series[0], lw=1.6)
+        ax.plot(xs[good], ys[good], "o", color=theme.series[0], markersize=3.5)
+        if np.any(~good):
+            ax.plot(xs[~good], ys[~good], "o", markerfacecolor="none", color=theme.bad, markersize=5)
+        ax.set_title(title, fontsize=9)
+        if col != "polar" and current is not None and np.nanmin(x) <= conv(current) <= np.nanmax(x):
+            ax.axvline(float(conv(current)), color=theme.accent2, lw=1.0, ls=":")
+        if stall is not None and stall.reached and sweep.variable == "alpha" and col != "polar":
+            ax.axvline(stall.alpha_first_stall, color=theme.bad, lw=1.0, ls="--")
+    if stall is not None and stall.reached and sweep.variable == "alpha":
+        axes[0].annotate("first stall", xy=(stall.alpha_first_stall, 0.02), xycoords=("data", "axes fraction"), color=theme.bad, fontsize=7, rotation=90, va="bottom", ha="right")
 
 
 # =================================================================================== widget

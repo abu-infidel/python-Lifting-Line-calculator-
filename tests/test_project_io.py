@@ -330,3 +330,44 @@ def test_the_elliptic_example_has_unit_span_efficiency():
     st.solver.engine = "builtin"
     t = run(Backend().build_request(st)).totals
     assert t.e == pytest.approx(1.0, abs=0.02)
+
+
+# ========================================================================================= examples
+def test_the_example_project_files_load_run_and_match_the_presets():
+    from pathlib import Path
+
+    folder = Path(__file__).resolve().parents[1] / "examples"
+    files = sorted(folder.glob("*.json"))
+    assert len(files) == len(PRESETS)
+    for f in files:
+        st = ProjectState.load(f)
+        assert st.name in PRESETS and st.to_dict() == PRESETS[st.name]().to_dict(), f.name
+        st.solver.engine = "builtin"
+        assert run(Backend().build_request(st)).totals.CL > 0.0
+
+
+# ============================================================================== engine fallback
+def test_a_failing_section_engine_falls_back_to_the_builtin_one_with_a_note(monkeypatch):
+    """E.g. NeuralFoil's dependencies fail to load on some machine: the analysis still runs, and says so."""
+    real_make = backend_module.make_engine
+
+    class Broken:
+        name = "broken"
+
+        def aero(self, airfoil):
+            raise RuntimeError("casadi could not be loaded")
+
+    monkeypatch.setattr(backend_module, "available_engines", lambda: {"neuralfoil": (True, ""), "builtin": (True, "")})
+    monkeypatch.setattr(backend_module, "make_engine", lambda kind, settings=None: Broken() if kind == "neuralfoil" else real_make(kind, settings))
+    st = ProjectState()
+    st.solver.engine = "neuralfoil"
+    be = Backend()
+    req = be.build_request(st)
+    res = run(req)
+    assert "Built-in" in str(res.info["section_engine"]) and res.totals.CL > 0
+    assert any("casadi could not be loaded" in w and "built-in engine was used instead" in w for w in res.warnings)
+    # the built-in engine itself failing is a real error, not something to hide
+    monkeypatch.setattr(backend_module, "make_engine", lambda kind, settings=None: Broken())
+    st.solver.engine = "builtin"
+    with pytest.raises(RuntimeError):
+        Backend().build_request(st)

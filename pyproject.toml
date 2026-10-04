@@ -28,6 +28,7 @@ include = ["liftingline*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+faulthandler_timeout = 150  # dump every thread's stack if a single test hangs
 filterwarnings = [
     "ignore:.*AA_UseHighDpiPixmaps.*:DeprecationWarning",
 ]

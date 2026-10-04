@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -22,6 +22,7 @@ from ..airfoil.section_base import EngineSettings, SectionEngine
 from ..airfoil.section_model import OverriddenAero, SectionOverride, WingSectionModel, reference_cd0
 from ..airfoil.section_polarfile import PolarParseError, TabulatedPolarAero, load_polar
 from ..core.analysis import AnalysisRequest, MomentReference
+from ..core.controls import ControlSet
 from ..core.flow import FlowCondition
 from ..core.wing import Wing
 from .project import REF_ABSOLUTE, ProjectError, ProjectState, SolverSpec
@@ -162,6 +163,25 @@ class Backend:
         return KeyStatus("ok", text, res)
 
     # --------------------------------------------------------------------- section model
+    def _make_aeros(self, resolutions: list[Resolution], state: ProjectState):
+        """Section data for every airfoil, with a warm-up call so that a broken engine fails *here* (and the
+        built-in engine takes over with a note) rather than half-way through an analysis or a sweep."""
+        engine, note = self.engine(state.solver)
+        probe = np.array([1.0e6])
+        try:
+            aeros = [engine.aero(r.airfoil) for r in resolutions]
+            for a in aeros:
+                a.linear(probe)
+        except Exception as exc:
+            kind, _ = self.engine_kind(state.solver)
+            if kind == BUILTIN:
+                raise
+            fallback, _ = self.engine(replace(state.solver, engine="builtin"))
+            aeros = [fallback.aero(r.airfoil) for r in resolutions]
+            note = f"The section engine could not be used ({type(exc).__name__}: {exc}); the built-in engine was used instead."
+            engine = fallback
+        return engine, aeros, note
+
     def section_model(self, wing: Wing, state: ProjectState) -> WingSectionModel:
         keys = [s.airfoil for s in wing.sections]
         resolutions: list[Resolution] = []
@@ -170,8 +190,7 @@ class Backend:
                 resolutions.append(self.resolver.resolve(key))
             except AirfoilNotFound as exc:
                 raise ProjectError(f"Airfoil of section {i + 1}: {exc}") from exc
-        engine, engine_note = self.engine(state.solver)
-        aeros = [engine.aero(r.airfoil) for r in resolutions]
+        engine, aeros, engine_note = self._make_aeros(resolutions, state)
         labels = [engine.name]
         for i, path in enumerate(state.airfoils.polar_files[: len(aeros)]):
             if path:
@@ -195,6 +214,7 @@ class Backend:
         model = self.section_model(wing, state)
         f, s = state.flow, state.solver
         absolute = f.ref_mode == REF_ABSOLUTE
+        controls = ControlSet.from_dicts(state.controls, wing.half_span) if state.controls else None
         return AnalysisRequest(
             wing=wing,
             flow=flow,
@@ -212,6 +232,7 @@ class Backend:
             convergence_check=s.convergence_check,
             ground_height=f.ground_height_m if f.ground_effect else None,
             n_panels=s.n_panels,
+            controls=controls,
         )
 
     # ---------------------------------------------------------------------- description

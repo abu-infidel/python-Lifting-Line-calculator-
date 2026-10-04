@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "name": "Sailplane wing, AR 22",
+  "notes": "High aspect ratio: induced drag matters less, profile drag and Reynolds number matter more.",
+  "wing": {
+    "mode": "trapezoid",
+    "define_by": "span_chords",
+    "span": 18.0,
+    "root_chord": 1.1,
+    "tip_chord": 0.5,
+    "area": 14.4,
+    "aspect_ratio": 22.5,
+    "taper_ratio": 0.45454545454545453,
+    "sweep_deg": 0.0,
+    "sweep_at": 0.25,
+    "dihedral_deg": 3.0,
+    "twist_tip_deg": -1.5,
+    "incidence_deg": 0.0,
+    "sections": [],
+    "name": "Sailplane wing, AR 22"
+  },
+  "airfoils": {
+    "keys": [
+      "NACA 4415",
+      "NACA 4412"
+    ],
+    "overrides": [
+      {},
+      {}
+    ],
+    "polar_files": [
+      "",
+      ""
+    ]
+  },
+  "flow": {
+    "atmosphere": "isa",
+    "altitude_m": 0.0,
+    "delta_T": 0.0,
+    "rho": 1.225,
+    "T": 288.15,
+    "mu": null,
+    "speed_mode": "speed",
+    "V": 28.0,
+    "mach": 0.16,
+    "alpha_deg": 3.0,
+    "beta_deg": 0.0,
+    "ground_effect": false,
+    "ground_height_m": 2.0,
+    "extra_cd0": 0.0,
+    "compressibility": true,
+    "ref_mode": "mac",
+    "ref_x_frac_mac": 0.25,
+    "ref_x_abs_m": 0.0,
+    "ref_z_abs_m": 0.0
+  },
+  "solver": {
+    "solver": "auto",
+    "n_terms": 80,
+    "n_panels": 80,
+    "nonlinear": "auto",
+    "convergence_check": true,
+    "engine": "auto",
+    "model_size": "xlarge",
+    "n_crit": 9.0,
+    "xtr_upper": 1.0,
+    "xtr_lower": 1.0
+  },
+  "controls": []
+}

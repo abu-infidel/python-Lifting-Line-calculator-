@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
+from ..core.controls import validate_rows as validate_control_rows
 from ..core.flow import FlowCondition
 from ..core.wing import KIND_ELLIPTIC, Section, Wing
 
@@ -299,6 +300,7 @@ class ProjectState:
     solver: SolverSpec = field(default_factory=SolverSpec)
     name: str = "Untitled"
     notes: str = ""
+    controls: list[dict[str, Any]] = field(default_factory=list)  # control surfaces (see core.controls.ControlSurface)
 
     def __post_init__(self) -> None:
         self.airfoils.fit(self.wing.n_sections())
@@ -319,6 +321,7 @@ class ProjectState:
             airfoils=dump(self.airfoils),
             flow=dump(self.flow),
             solver=dump(self.solver),
+            controls=copy.deepcopy(self.controls),
         )
 
     @classmethod
@@ -344,6 +347,7 @@ class ProjectState:
             solver=load(SolverSpec, data.get("solver")),
             name=str(data.get("name", "Untitled")),
             notes=str(data.get("notes", "")),
+            controls=[dict(c) for c in (data.get("controls") or []) if isinstance(c, dict)],
         )
         state.wing.sync()
         state.airfoils.fit(state.wing.n_sections())
@@ -395,4 +399,5 @@ class ProjectState:
             problems.append("Flow: angles above 40 degrees are far outside the range of lifting-line theory")
         if f.ref_mode == REF_ABSOLUTE and not math.isfinite(f.ref_x_abs_m):
             problems.append("Flow: the moment reference point must be a number")
+        problems += [f"Controls: {m}" for m in validate_control_rows(self.controls)]
         return problems

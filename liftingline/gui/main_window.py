@@ -7,6 +7,7 @@ The window owns no physics. It collects a :class:`ProjectState` from the panels,
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QThreadPool, QTimer, Qt
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDockWidget,
     QFileDialog,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -30,14 +32,21 @@ from .. import __version__
 from ..airfoil.engines import NEURALFOIL, available_engines
 from ..airfoil.library import AirfoilLibrary
 from ..core.analysis import SOLVER_AUTO
+from ..core.validate import FAIL, format_report, run_validation
+from ..core.sweeps import linspace_values, run_sweep, stall_info
 from ..io.backend import Backend
 from ..io.presets import PRESETS, light_aircraft
-from ..io.project import ProjectError, ProjectState
+from ..io.project import MODE_SECTIONS, AirfoilSpec, ProjectError, ProjectState
 from ..io.report import result_to_csv
 from .airfoil_panel import AirfoilPanel
+from .compare_view import CompareView
+from .controls_panel import ControlsPanel
+from .dialogs import OptimalTwistDialog, TrimDialog
+from .export import export_pdf
 from .flow_panel import FlowPanel
 from .library_dialog import LibraryDialog, ReportDialog
 from .plots import make_canvas, plot_airfoils, plot_planform, plot_spanwise
+from .polars_view import PolarsView
 from .results_view import ResultsView
 from .settings import Settings
 from .solver_panel import SolverPanel
@@ -64,6 +73,34 @@ uses S and the mean aerodynamic chord; C<sub>l</sub> and C<sub>n</sub> use S and
 <li><b>Tip loss</b> is part of the theory: the circulation falls to zero at the tips, which produces the downwash and
 the induced drag. No extra empirical tip factor is applied.</li>
 </ul>
+"""
+
+
+LIMITS_HTML = """
+<h3>What this program can and cannot do</h3>
+<p><b>The model.</b> Each spanwise station is an airfoil whose lift, drag and moment come from the section data (NeuralFoil
+or the built-in engine) at that station's own Reynolds number and effective angle of attack. Prandtl's lifting-line
+theory couples the stations through the trailing vortex sheet: it supplies the induced angle, hence the induced drag and
+the tip loss. Profile drag is added from the section polars.</p>
+<p><b>Where it is accurate.</b> Straight wings of aspect ratio above about 4 in subsonic flow (Mach below about 0.7) with
+attached flow: lift and induced drag typically within a few per cent of lifting-surface methods; profile drag and
+stall depend on the section data (NeuralFoil: XFOIL-like; built-in: roughly 3-5 % in lift slope and maximum lift,
+10-25 % in drag).</p>
+<p><b>Where it is approximate.</b></p>
+<ul>
+<li><b>Low aspect ratio</b> (below 4): lift and induced drag are over-predicted.</li>
+<li><b>Sweep</b>: the numerical solver reproduces the effect of sweep on lift to about 2-6 % up to 45 degrees; the rolling
+moment due to sideslip is over-predicted by 20-30 %. Beyond 45 degrees the results are not reliable.</li>
+<li><b>Ground effect</b>: only the three-dimensional (image vortex) part is modelled; the lift increase is under-predicted
+by about 7 % x (chord/height)<sup>2</sup> of the lift, so below two chords of height treat the result with care.</li>
+<li><b>Stall</b>: the section polars drive the post-stall behaviour. NeuralFoil gives a lift drop after stall; the built-in
+engine saturates at its maximum lift. Results beyond the maximum lift are indicative only.</li>
+<li><b>Control surfaces</b> use thin-airfoil flap theory times an effectiveness factor; maximum-lift changes, flap drag and
+gaps are not modelled.</li>
+</ul>
+<p><b>Not modelled</b>: fuselage, nacelles and tail (add their drag with the extra-drag coefficient), wing-body
+interference, propeller slipstream, wave drag, unsteady and dynamic effects, aeroelastic deformation.</p>
+<p>The <i>Help &gt; Run the self-test</i> command checks the program against exact solutions and published results.</p>
 """
 
 
@@ -97,6 +134,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(APP_TITLE)
         self.resize(1500, 900)
+        self.setAcceptDrops(True)
         self._build_panels()
         self._build_central()
         self._build_results_dock()
@@ -132,10 +170,12 @@ class MainWindow(QMainWindow):
         self.airfoil_panel = AirfoilPanel(self.backend)
         self.flow_panel = FlowPanel(self.system)
         self.solver_panel = SolverPanel()
+        self.controls_panel = ControlsPanel()
         self.input_tabs = QTabWidget()
         for panel, title in (
             (self.wing_panel, "Wing"),
             (self.airfoil_panel, "Airfoils"),
+            (self.controls_panel, "Controls"),
             (self.flow_panel, "Flow"),
             (self.solver_panel, "Solver"),
         ):
@@ -152,7 +192,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
         self.inputs_dock = dock
 
-        for panel in (self.wing_panel, self.airfoil_panel, self.flow_panel, self.solver_panel):
+        for panel in (self.wing_panel, self.airfoil_panel, self.controls_panel, self.flow_panel, self.solver_panel):
             panel.changed.connect(self._on_changed)
         self.wing_panel.sections_changed.connect(self._sync_stations)
         self.wing_panel.preset_requested.connect(self._apply_preset)
@@ -172,6 +212,14 @@ class MainWindow(QMainWindow):
         self.plot_tabs.addTab(self.canvases["planform"], "Planform")
         self.plot_tabs.addTab(self.canvases["spanwise"], "Spanwise loads")
         self.plot_tabs.addTab(self.canvases["airfoils"], "Airfoils")
+        self.polars = PolarsView(self.system)
+        self.polars.run_requested.connect(self._start_sweep)
+        self.polars.cancel_requested.connect(self._cancel_sweep)
+        self.plot_tabs.addTab(self.polars, "Polars and stall")
+        self.compare = CompareView(self.system)
+        self.plot_tabs.addTab(self.compare, "Compare")
+        self._sweep_cancel = False
+        self._sweeping = False
         self.plot_tabs.currentChanged.connect(lambda _i: self._draw_visible())
         self.setCentralWidget(self.plot_tabs)
         self._stale_views: set[str] = {"planform", "spanwise", "airfoils"}
@@ -246,6 +294,7 @@ class MainWindow(QMainWindow):
         self._add_action(m, "Save &as...", self.save_project_as, "Ctrl+Shift+S")
         m.addSeparator()
         self._add_action(m, "Export results as &CSV...", self.export_csv)
+        self._add_action(m, "Export &report as PDF...", self.export_pdf_report)
         m.addSeparator()
         self._add_action(m, "&Quit", self.close, "Ctrl+Q")
         self._refresh_recent_menu()
@@ -257,6 +306,10 @@ class MainWindow(QMainWindow):
             m.addAction(act)
 
         m = mb.addMenu("&Tools")
+        self._add_action(m, "&Trim: find angle of attack or speed...", self.open_trim, "Ctrl+T")
+        self._add_action(m, "&Ideal twist for an elliptic load...", self.open_ideal_twist)
+        self._add_action(m, "&Pin result for comparison", self.pin_result, "Ctrl+P")
+        m.addSeparator()
         self._add_action(m, "Airfoil library &folder...", self.choose_library_folder)
         self._add_action(m, "Library &health check...", self.library_health_check)
 
@@ -274,6 +327,8 @@ class MainWindow(QMainWindow):
 
         m = mb.addMenu("&Help")
         self._add_action(m, "Axes and sign &conventions", self.show_conventions, "F1")
+        self._add_action(m, "&Limits of the theory", self.show_limits)
+        self._add_action(m, "Run the &self-test...", self.run_self_test)
         self._add_action(m, "&About", self.show_about)
 
     def _add_action(self, menu, text: str, slot, shortcut: str | None = None) -> QAction:
@@ -304,6 +359,7 @@ class MainWindow(QMainWindow):
         self.airfoil_panel.store(st)
         self.flow_panel.store(st)
         self.solver_panel.store(st)
+        self.controls_panel.store(st)
         st.solver.solver = self.solver_combo.currentData()
         st.solver.engine = self.engine_combo.currentData()
         st.name, st.notes = self.project_name, self.notes
@@ -318,14 +374,17 @@ class MainWindow(QMainWindow):
             self.airfoil_panel.load(state)
             self.flow_panel.load(state)
             self.solver_panel.load(state)
+            self.controls_panel.load(state)
             self.solver_combo.setCurrentIndex(max(self.solver_combo.findData(state.solver.solver), 0))
             self.engine_combo.setCurrentIndex(max(self.engine_combo.findData(state.solver.engine), 0))
             self.project_name, self.notes = state.name, state.notes
             self.last = None
             self.results.clear()
             self.airfoil_panel.show_infos(None)
+            self.polars.clear()
         finally:
             self._loading = False
+        self._refresh_polars_context()
         self._invalidate_views("planform", "spanwise", "airfoils")
 
     def _apply_preset(self, name: str) -> None:
@@ -346,6 +405,8 @@ class MainWindow(QMainWindow):
         self._stale = True
         self._update_title()
         self._sync_stations()
+        self._refresh_polars_context()
+        self.polars.mark_stale()
         self._invalidate_views("planform", "airfoils")
         if self.act_auto.isChecked():
             self._debounce.start()
@@ -371,6 +432,8 @@ class MainWindow(QMainWindow):
         finally:
             self._loading = False
         self.results.set_system(self.system)
+        self.polars.set_system(self.system)
+        self.compare.set_system(self.system)
         self._invalidate_views("planform", "spanwise", "airfoils")
 
     def set_theme(self, mode: str) -> None:
@@ -379,6 +442,8 @@ class MainWindow(QMainWindow):
         self.airfoil_panel.refresh_status()
         if self.last is not None:
             self.results.show_result(self.last.result)
+        self.polars.redraw()
+        self.compare.redraw()
         self._invalidate_views("planform", "spanwise", "airfoils")
 
     # ========================================================================== running
@@ -386,7 +451,9 @@ class MainWindow(QMainWindow):
         return self._running
 
     def _collect_problems(self, state: ProjectState) -> list[str]:
-        problems = self.wing_panel.problems() + self.flow_panel.problems() + self.solver_panel.problems()
+        problems = (
+            self.wing_panel.problems() + self.controls_panel.problems() + self.flow_panel.problems() + self.solver_panel.problems()
+        )
         if problems:
             return problems
         problems = state.validate()
@@ -488,7 +555,10 @@ class MainWindow(QMainWindow):
 
     def _draw_visible(self) -> None:
         names = ("planform", "spanwise", "airfoils")
-        current = names[self.plot_tabs.currentIndex()]
+        i = self.plot_tabs.currentIndex()
+        if i >= len(names):
+            return
+        current = names[i]
         if current in self._stale_views:
             self._stale_views.discard(current)
             getattr(self, f"_draw_{current}")()
@@ -530,6 +600,143 @@ class MainWindow(QMainWindow):
                 entries.append((short, None))
         sel = self.airfoil_panel.selected()
         self.canvases["airfoils"].draw_with(lambda fig, th: plot_airfoils(fig, entries, sel, th))
+
+    # ================================================================== trim, twist, compare
+    def _ready_state(self, what: str) -> ProjectState | None:
+        state = self.collect_state()
+        problems = self._collect_problems(state)
+        if problems:
+            QMessageBox.information(self, APP_TITLE, f"Fix the inputs before using {what}:\n\n" + "\n".join(problems))
+            return None
+        return state
+
+    def open_trim(self) -> None:
+        state = self._ready_state("trim")
+        if state is None:
+            return
+        t = self.last.result.totals if self.last is not None else None
+        dlg = TrimDialog(
+            lambda: self.backend.build_request(state), self.system, t.CL if t else 0.5, t.L if t else 10000.0, self
+        )
+        dlg.apply_requested.connect(self._apply_trim)
+        dlg.exec()
+
+    def _apply_trim(self, variable: str, value: float) -> None:
+        spec = self.flow_panel.spec()
+        if variable == "alpha_deg":
+            spec.alpha_deg = value
+        else:
+            spec.V, spec.speed_mode = value, "speed"
+        self.flow_panel.load_spec(spec)
+        self.results.log(f"trim applied: {variable} = {value:.4g}")
+        self._on_changed()
+        self.request_run()
+
+    def open_ideal_twist(self) -> None:
+        state = self._ready_state("the ideal-twist tool")
+        if state is None:
+            return
+        cl = self.last.result.totals.CL if self.last is not None else 0.5
+        dlg = OptimalTwistDialog(lambda: self.backend.build_request(state), cl, self.system, self)
+        dlg.apply_requested.connect(self._apply_ideal_twist)
+        dlg.exec()
+
+    def _apply_ideal_twist(self, ot) -> None:
+        state = self.collect_state()
+        old = state.build_wing()
+        keys_old, ys_old = [s.airfoil for s in old.sections], [s.y for s in old.sections]
+        new_keys = [keys_old[min(range(len(ys_old)), key=lambda k: abs(ys_old[k] - r["y"]))] for r in ot.rows]
+        n = len(ot.rows)
+        state.wing.mode = MODE_SECTIONS
+        state.wing.sections = [dict(r) for r in ot.rows]
+        state.airfoils = AirfoilSpec(keys=new_keys, overrides=[{} for _ in range(n)], polar_files=["" for _ in range(n)])
+        state.flow.alpha_deg = ot.alpha_root_deg - old.incidence_deg
+        self.apply_state(state)
+        self._dirty = True
+        self._update_title()
+        self.results.log(
+            f"ideal twist applied: {n} sections, root angle {ot.alpha_root_deg:.3f} deg"
+            + (" (section airfoils taken from the nearest original section)" if len(set(keys_old)) > 1 else "")
+        )
+        self.request_run()
+
+    def pin_result(self) -> None:
+        if self.last is None:
+            QMessageBox.information(self, APP_TITLE, "Run an analysis first, then pin its result.")
+            return
+        st = self.last.state
+        default = f"#{len(self.compare.snapshots) + 1}: alpha {st.flow.alpha_deg:g} deg, V {st.flow.V:g} m/s"
+        name, ok = QInputDialog.getText(self, "Pin result", "Name for this result:", text=default)
+        if not ok or not name.strip():
+            return
+        if not self.compare.pin(name.strip(), self.last.result):
+            QMessageBox.information(self, APP_TITLE, "At most 6 results can be compared; remove one first.")
+            return
+        self.plot_tabs.setCurrentWidget(self.compare)
+        self.results.log(f"pinned result '{name.strip()}'")
+
+    # ========================================================================= sweeps
+    def _refresh_polars_context(self) -> None:
+        """Tell the Polars tab about the control surfaces and the operating point of the inputs."""
+        rows = self.controls_panel.rows()
+        self.polars.set_controls([d["name"] for d in rows])
+        f = self.flow_panel.spec()
+        deflection = rows[0]["deflection_deg"] if rows else 0.0
+        self.polars.set_current(
+            dict(alpha=f.alpha_deg, beta=f.beta_deg, speed=f.V, altitude=f.altitude_m, deflection=deflection)
+        )
+
+    def _start_sweep(self, variable: str, start: float, stop: float, points: int, hold: str, control: str) -> None:
+        state = self.collect_state()
+        problems = self._collect_problems(state)
+        if problems:
+            self.polars.summary.setText("Cannot sweep: " + problems[0])
+            return
+        self._sweep_cancel = False
+        self._sweeping = True
+        self.polars.set_running(True)
+        delta_T = state.flow.delta_T if state.flow.atmosphere == "isa" else 0.0
+
+        def work(progress):
+            req = self.backend.build_request(state)
+            sw = run_sweep(
+                req, variable, linspace_values(start, stop, points), control=control or None, hold=hold, delta_T=delta_T,
+                progress=progress, cancelled=lambda: self._sweep_cancel,
+            )
+            return sw, (stall_info(sw) if variable == "alpha" else None)
+
+        task = FuncTask(work)
+        task.signals.progress.connect(self.polars.set_progress)
+        task.signals.finished.connect(self._sweep_done)
+        task.signals.failed.connect(self._sweep_failed)
+        self._tasks.append(task)
+
+        def forget(*_a) -> None:
+            if task in self._tasks:
+                self._tasks.remove(task)
+
+        task.signals.finished.connect(forget)
+        task.signals.failed.connect(forget)
+        self.pool.start(task)  # the same single-thread pool as the analyses: they never run at the same time
+
+    def _cancel_sweep(self) -> None:
+        self._sweep_cancel = True
+
+    def _sweep_done(self, payload) -> None:
+        sweep, stall = payload
+        self._sweeping = False
+        self.polars.set_running(False)
+        self.polars.show_result(sweep, stall)
+        self.results.log(f"sweep of {sweep.variable}: {len(sweep.points)} points")
+
+    def _sweep_failed(self, message: str) -> None:
+        self._sweeping = False
+        self.polars.set_running(False)
+        self.polars.summary.setText("The sweep failed: " + message)
+        self.results.log("sweep failed: " + message)
+
+    def is_sweeping(self) -> bool:
+        return self._sweeping
 
     # ===================================================================== library
     def choose_library_folder(self) -> None:
@@ -585,18 +792,43 @@ class MainWindow(QMainWindow):
             if name:
                 self.airfoil_panel.set_key(row, name)
 
-    def library_health_check(self) -> None:
+    def library_health_check(self, modal: bool = True) -> ReportDialog | None:
         lib = self.backend.library
         if lib is None:
             QMessageBox.information(self, APP_TITLE, "Choose the airfoil library folder first (Solver tab or Tools menu).")
-            return
+            return None
         dlg = ReportDialog("Airfoil library health check", self)
         task = FuncTask(lambda progress: lib.health_report(progress).to_text())
         task.signals.progress.connect(dlg.set_progress)
         task.signals.finished.connect(lambda text: dlg.finish(text, "Finished"))
         task.signals.failed.connect(lambda msg: dlg.finish(msg, "Failed"))
         self._start_func_task(task)
-        dlg.exec()
+        return self._show_report(dlg, modal)
+
+    @staticmethod
+    def _show_report(dlg: ReportDialog, modal: bool) -> ReportDialog:
+        if modal:
+            dlg.exec()
+        else:
+            dlg.show()
+        return dlg
+
+    def run_self_test(self, modal: bool = True) -> ReportDialog:
+        """Run the built-in validation suite (analytic benchmarks) and show the report."""
+        dlg = ReportDialog("Self-test", self)
+        t0 = time.perf_counter()
+        task = FuncTask(lambda progress: run_validation(progress))
+
+        def done(checks) -> None:
+            failed = sum(1 for c in checks if c.status == FAIL)
+            dlg.finish(format_report(checks, time.perf_counter() - t0), "All checks passed" if not failed else f"{failed} check(s) failed")
+            self.results.log(f"self-test: {'all passed' if not failed else f'{failed} failed'}")
+
+        task.signals.progress.connect(dlg.set_progress)
+        task.signals.finished.connect(done)
+        task.signals.failed.connect(lambda msg: dlg.finish(msg, "The self-test could not run"))
+        self._start_func_task(task)
+        return self._show_report(dlg, modal)
 
     # ======================================================================== files
     def _update_title(self) -> None:
@@ -699,9 +931,30 @@ class MainWindow(QMainWindow):
             return
         self.results.log(f"exported {path}")
 
+    def export_pdf_report(self) -> None:
+        if self.last is None:
+            QMessageBox.information(self, APP_TITLE, "Run an analysis first.")
+            return
+        start = str(Path(self.settings.get_str("files/last_dir", "")) / f"{self.project_name}-report.pdf")
+        path, _ = QFileDialog.getSaveFileName(self, "Export report", start, "PDF files (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        sweep = None if self.polars.sweep is None else self.polars.sweep
+        try:
+            pages = export_pdf(path, self.last.state, self.last.result, self.last.infos, self.system, sweep, self.polars.stall)
+        except Exception as exc:  # a report problem must not take the window down
+            QMessageBox.warning(self, APP_TITLE, f"Could not write the report:\n{exc}")
+            return
+        self.results.log(f"exported {path} ({pages} pages)")
+
     # ========================================================================== help
     def show_conventions(self) -> None:
         QMessageBox.information(self, "Conventions", CONVENTIONS_HTML)
+
+    def show_limits(self) -> None:
+        QMessageBox.information(self, "Limits of the theory", LIMITS_HTML)
 
     def show_about(self) -> None:
         QMessageBox.about(
@@ -713,6 +966,28 @@ class MainWindow(QMainWindow):
             "<p>Classical Glauert solution for straight wings, numerical horseshoe-vortex lifting line for sweep, "
             "dihedral, sideslip and ground effect.</p>",
         )
+
+    # ================================================================== drag and drop
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if event.mimeData().hasUrls() and any(u.isLocalFile() for u in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """A dropped ``.json`` opens as a project, a ``.dat`` becomes the airfoil of the selected section."""
+        for url in event.mimeData().urls():
+            self.open_dropped_file(url.toLocalFile())
+            break
+
+    def open_dropped_file(self, path: str) -> None:
+        low = path.lower()
+        if low.endswith(".json"):
+            self.open_project(path)
+        elif low.endswith((".dat", ".txt")):
+            self.input_tabs.setCurrentWidget(self.input_tabs.widget(1))
+            self.airfoil_panel.set_key(self.airfoil_panel.selected(), path)
+            self.results.log(f"airfoil file {Path(path).name} assigned to the selected section")
+        else:
+            self.results.log(f"ignored dropped file {Path(path).name} (use a .json project or a .dat airfoil)")
 
     # ======================================================================== close
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
