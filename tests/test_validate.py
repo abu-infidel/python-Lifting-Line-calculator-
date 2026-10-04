@@ -9,8 +9,8 @@ def test_the_suite_passes_and_covers_every_group():
     checks = run_validation()
     failed = [c for c in checks if c.status == FAIL]
     assert not failed, "\n".join(f"{c.group}: {c.name}: expected {c.expected} got {c.got} {c.note}" for c in failed)
-    assert len(checks) >= 55 and sum(1 for c in checks if c.status == PASS) >= 50
-    assert len({c.group for c in checks}) == 6
+    assert len(checks) >= 65 and sum(1 for c in checks if c.status == PASS) >= 60
+    assert len({c.group for c in checks}) == 7
     assert all(c.status in (PASS, SKIP) for c in checks)
 
 

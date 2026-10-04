@@ -92,6 +92,8 @@ class ResultsView(QWidget):
         bits.append(f"section data: <b>{_html_escape(str(info.get('section_engine', '')))}</b>")
         if info.get("nonlinear"):
             bits.append("nonlinear section polars")
+        if info.get("high_lift"):
+            bits.append(f"<b>{_html_escape(str(info['high_lift']))}</b>")
         bits.append(f"{1000 * float(info.get('solve_time_s', 0.0)):.0f} ms")
         self.header.setText(" &middot; ".join(bits))
 

@@ -29,7 +29,7 @@ python main.py
 * **Linux** - Qt needs the system OpenGL/EGL libraries (`sudo apt install libegl1 libopengl0` on Debian/Ubuntu).
 * **No network is needed at run time.** The UIUC airfoil database is *not* downloaded by the program: point it at the folder you
   already have (Solver tab -> Airfoil library, or Tools -> Airfoil library folder).
-* Check the installation any time with `python -m liftingline --validate` (60 analytic checks, about 3 seconds) or from
+* Check the installation any time with `python -m liftingline --validate` (70 checks, about 3 seconds) or from
   *Help -> Run the self-test*.
 
 ## Quick start
@@ -109,11 +109,53 @@ The sweep on the right marks the first stall and shows unconverged post-stall po
 * **Trim** (Tools menu) - the angle of attack for a target CL or lift (weight in level flight), or the airspeed for a weight.
 * **Ideal twist** - the twist that gives your planform an elliptic load (span efficiency 1) at a design CL; it becomes a section
   table and the angle of attack is set for the design lift.
+* **High lift tab** - two toggles: **Deploy trailing-edge flaps** and **Deploy leading-edge slats**, for the takeoff or the
+  landing setting (see [High-lift devices](#high-lift-devices-flaps-and-slats)). *Analyse stall* finds the maximum lift of the
+  clean wing and of the wing with the devices out, the stall speeds for a weight and the comparison with the handbook.
+* **3-D model** (File -> *Export wing as 3-D model (STL)*) - the wing with its real airfoils, twist, sweep and dihedral as a
+  watertight STL surface for CAD, 3-D printing or rendering (see [STL export](#stl-export)).
 * **Controls tab** - plain flaps and ailerons (span range, chord fraction, deflection) as thin-airfoil effects times an
   effectiveness factor: roll power, adverse yaw, flap lift and pitching moment.
 * **Pin result for comparison** (Ctrl+P) - overlay up to six results, with a table of their totals.
 * **File menu** - projects are plain JSON (`*.json`); export results as CSV or a multi-page **PDF report**. The `examples/`
   folder holds the example wings as project files.
+
+### High-lift devices (flaps and slats)
+
+Both toggles are off by default, and with both off every result is exactly that of the clean wing (tested bit for bit).
+When deployed, the devices change only the wing sections they cover, with published handbook increments - D. P. Raymer,
+*Aircraft Design: A Conceptual Approach* (AIAA), chapter 12, which condenses NACA and industry wind-tunnel results:
+
+| Trailing-edge flap | section d(cl_max), landing | Leading-edge device | section d(cl_max) |
+|---|---|---|---|
+| plain, split | 0.9 | fixed slot | 0.2 |
+| single slotted | 1.3 | leading-edge (droop) flap | 0.3 |
+| Fowler | 1.3 c'/c | Krueger flap | 0.3 |
+| double slotted | 1.6 c'/c | slat | 0.4 c'/c |
+| triple slotted | 1.9 c'/c | | |
+
+* **Flaps** also shift the section zero-lift angle by -15 deg (landing) or -10 deg (takeoff); at the takeoff setting the gain in
+  maximum lift is 70 % of the landing value (the handbook gives 60-80 %). Fowler-type flaps (c'/c > 1) raise the lift-curve slope
+  with the chord extension. Flap profile drag follows Raymer's correlation `F (cf/c) (delta - 10)` at the typical deflection of the
+  flap type (takeoff 15-20 deg, landing 40-60 deg); the pitching moment follows thin-airfoil flap theory (nose down).
+* **Slats** (and the other leading-edge devices) raise the maximum lift and extend the lift curve to a higher stall angle; the lift
+  below the stall is unchanged.
+* The section polar of the chosen engine is mapped station by station onto these values, so the lifting-line solution itself decides
+  how much of the gain the wing realises; the handbook wing-level estimate `d(CL_max) = 0.9 d(cl_max) (S'/S) cos(hinge sweep)` is
+  shown next to it. Deploying the devices above Mach 0.35 produces a warning (they are takeoff and landing devices).
+![High lift tab: flaps and slats deployed for landing](docs/img/highlift.png)
+
+* **Analyse stall** reports CL_max for both configurations - the peak of the lift curve (NeuralFoil), or, for the built-in engine
+  whose polars saturate at cl_max, the knee where the lift-curve slope has fallen to 20 % - the first section to stall, the stall
+  speed for the weight you enter and conventional reference speeds (takeoff 1.1 and 1.2 Vs, landing 1.15 and 1.3 Vs).
+
+### STL export
+
+File -> *Export wing as 3-D model (STL)* writes the described wing as a closed triangle surface built from the real airfoil
+coordinates: twist (and, optionally, the root incidence) about the quarter chord, sweep, dihedral, airfoils blended between sections,
+both halves (or the right half closed at the root, for a half-span model), tips closed with caps, an elliptic tip ending in a
+point, a sharp (closed) trailing edge. Coordinates: x aft, y to the right wing, z up, in millimetres by default (or cm, m, in, ft)
+times a model scale (0.05 for a 1:20 model). Binary STL by default, ASCII on request.
 
 ## Conventions
 
@@ -181,6 +223,11 @@ tests; the self-test repeats the key ones):
 | Panel method vs exact Joukowski airfoil | slope error -0.1 % at 240 panels |
 | ISA atmosphere, units | to 1e-4 |
 | Built-in section engine vs NeuralFoil (hold-out airfoils) | lift slope 2.8 %, `cl_max` 4.5 %, `cd_min` 13 %, zero-lift angle 0.09 deg |
+| High-lift devices retracted | every result identical to the clean wing (bit for bit) |
+| Full-span flap, linear sections | exactly the clean wing at 15 deg more angle of attack |
+| Wing CL_max gain from flaps and slats vs the handbook estimate (Raymer) | ratio 0.99-1.11 for devices starting at the root (all flap and slat types, takeoff and landing, both section engines); with NeuralFoil about 20 % below it when an unflapped root strip stalls early in the flap-edge upwash |
+| Built-in engine CL_max (lift-curve knee) vs NeuralFoil lift peak | within -4 % .. +6 % |
+| STL model | watertight, outward normals, volume = airfoil area x chord^2 integrated over the span within 0.1 % |
 
 **Reading the accuracy of a result.** Lifting-line theory is a model, not an oracle: the numbers above are the *agreement with
 better or exact methods*, which is what bounds the error from the theory. On top of that comes the quality of the section data
@@ -197,6 +244,9 @@ airfoils at moderate Reynolds numbers).
 * **Post-stall** results are indicative: NeuralFoil gives a lift drop, the built-in engine saturates at its maximum lift.
   NeuralFoil is reliable for Reynolds numbers above about 2e5 and angles within -25 .. 30 deg; the program warns when confidence is low.
 * **Control surfaces** use thin-airfoil flap theory with an effectiveness factor; maximum-lift changes, flap drag and gaps are not modelled.
+* **High-lift devices** use handbook increments (typically good to 10-20 %), not the geometry of a particular flap or slat (gap,
+  overlap, deflection); slats add no drag and flap chord extension does not move the pitching moment in this model. A wing without
+  a fuselage stalls early next to an unflapped root strip; start the flaps at the root to stand in for the fuselage.
 * Not modelled: fuselage, tail, nacelles and their interference (add their drag as the extra-drag coefficient), propeller slipstream,
   unsteady and aeroelastic effects.
 * The program was developed and tested headlessly on Linux; the window code is plain PySide6/Qt and matplotlib, so Windows and macOS

@@ -24,6 +24,7 @@ from ..airfoil.section_polarfile import PolarParseError, TabulatedPolarAero, loa
 from ..core.analysis import AnalysisRequest, MomentReference
 from ..core.controls import ControlSet
 from ..core.flow import FlowCondition
+from ..core.highlift import HighLiftSection
 from ..core.wing import Wing
 from .project import REF_ABSOLUTE, ProjectError, ProjectState, SolverSpec
 
@@ -212,13 +213,15 @@ class Backend:
             raise ProjectError("\n".join(problems))
         wing, flow = state.build_wing(), state.build_flow()
         model = self.section_model(wing, state)
+        high_lift = state.high_lift.system()
+        section = HighLiftSection(model, high_lift, wing.half_span) if high_lift is not None else model
         f, s = state.flow, state.solver
         absolute = f.ref_mode == REF_ABSOLUTE
         controls = ControlSet.from_dicts(state.controls, wing.half_span) if state.controls else None
         return AnalysisRequest(
             wing=wing,
             flow=flow,
-            section=model,
+            section=section,
             solver=s.solver,
             n_terms=s.n_terms,
             nonlinear=_NONLINEAR[s.nonlinear],
@@ -237,8 +240,12 @@ class Backend:
 
     # ---------------------------------------------------------------------- description
     @staticmethod
-    def describe_sections(model: WingSectionModel, wing: Wing, flow: FlowCondition) -> list[SectionInfo]:
-        """Per-section factors at each section's own Reynolds number (engine values and effective values)."""
+    def describe_sections(model: WingSectionModel | HighLiftSection, wing: Wing, flow: FlowCondition) -> list[SectionInfo]:
+        """Per-section factors at each section's own Reynolds number (engine values and effective values).
+
+        These are the clean sections: high-lift devices are described by their own panel."""
+        if isinstance(model, HighLiftSection):
+            model = model.base
         out: list[SectionInfo] = []
         for i, (sec, aero, res) in enumerate(zip(wing.sections, model.aeros, model.resolutions)):
             chord = max(sec.chord, 0.1 * wing.root_chord)  # an elliptic tip has no chord: describe it at 10 % of the root

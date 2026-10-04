@@ -31,25 +31,31 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..airfoil.engines import NEURALFOIL, available_engines
 from ..airfoil.library import AirfoilLibrary
+from ..core import units
 from ..core.analysis import SOLVER_AUTO
+from ..core.highlift import format_report as format_high_lift_report
+from ..core.highlift import high_lift_report as compute_high_lift_report
 from ..core.validate import FAIL, format_report, run_validation
 from ..core.sweeps import linspace_values, run_sweep, stall_info
 from ..io.backend import Backend
 from ..io.presets import PRESETS, light_aircraft
 from ..io.project import MODE_SECTIONS, AirfoilSpec, ProjectError, ProjectState
 from ..io.report import result_to_csv
+from ..io.stl import MeshInfo, StlError, export_wing_stl
 from .airfoil_panel import AirfoilPanel
 from .compare_view import CompareView
 from .controls_panel import ControlsPanel
 from .dialogs import OptimalTwistDialog, TrimDialog
 from .export import export_pdf
 from .flow_panel import FlowPanel
+from .highlift_panel import HighLiftPanel
 from .library_dialog import LibraryDialog, ReportDialog
 from .plots import make_canvas, plot_airfoils, plot_planform, plot_spanwise
 from .polars_view import PolarsView
 from .results_view import ResultsView
 from .settings import Settings
 from .solver_panel import SolverPanel
+from .stl_dialog import StlExportDialog
 from .theme import apply_theme, current_theme
 from .widgets import set_role
 from .wing_panel import WingPanel
@@ -97,6 +103,9 @@ by about 7 % x (chord/height)<sup>2</sup> of the lift, so below two chords of he
 engine saturates at its maximum lift. Results beyond the maximum lift are indicative only.</li>
 <li><b>Control surfaces</b> use thin-airfoil flap theory times an effectiveness factor; maximum-lift changes, flap drag and
 gaps are not modelled.</li>
+<li><b>High-lift devices</b> (High lift tab) use published handbook increments of maximum lift, zero-lift angle and flap
+drag (Raymer), typically good to 10-20 %, not the details of a particular flap or slat. The wing maximum-lift gain agrees
+with the handbook wing-level estimate within about 10 % when the devices start at the root.</li>
 </ul>
 <p><b>Not modelled</b>: fuselage, nacelles and tail (add their drag with the extra-drag coefficient), wing-body
 interference, propeller slipstream, wave drag, unsteady and dynamic effects, aeroelastic deformation.</p>
@@ -171,11 +180,13 @@ class MainWindow(QMainWindow):
         self.flow_panel = FlowPanel(self.system)
         self.solver_panel = SolverPanel()
         self.controls_panel = ControlsPanel()
+        self.highlift_panel = HighLiftPanel(self.system)
         self.input_tabs = QTabWidget()
         for panel, title in (
             (self.wing_panel, "Wing"),
             (self.airfoil_panel, "Airfoils"),
             (self.controls_panel, "Controls"),
+            (self.highlift_panel, "High lift"),
             (self.flow_panel, "Flow"),
             (self.solver_panel, "Solver"),
         ):
@@ -192,8 +203,9 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
         self.inputs_dock = dock
 
-        for panel in (self.wing_panel, self.airfoil_panel, self.controls_panel, self.flow_panel, self.solver_panel):
+        for panel in (self.wing_panel, self.airfoil_panel, self.controls_panel, self.highlift_panel, self.flow_panel, self.solver_panel):
             panel.changed.connect(self._on_changed)
+        self.highlift_panel.report_requested.connect(self.high_lift_report)
         self.wing_panel.sections_changed.connect(self._sync_stations)
         self.wing_panel.preset_requested.connect(self._apply_preset)
         self.airfoil_panel.selection_changed.connect(lambda _i: self._invalidate_views("airfoils"))
@@ -295,6 +307,7 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._add_action(m, "Export results as &CSV...", self.export_csv)
         self._add_action(m, "Export &report as PDF...", self.export_pdf_report)
+        self._add_action(m, "Export wing as 3-D &model (STL)...", self.export_stl)
         m.addSeparator()
         self._add_action(m, "&Quit", self.close, "Ctrl+Q")
         self._refresh_recent_menu()
@@ -360,6 +373,7 @@ class MainWindow(QMainWindow):
         self.flow_panel.store(st)
         self.solver_panel.store(st)
         self.controls_panel.store(st)
+        self.highlift_panel.store(st)
         st.solver.solver = self.solver_combo.currentData()
         st.solver.engine = self.engine_combo.currentData()
         st.name, st.notes = self.project_name, self.notes
@@ -375,6 +389,7 @@ class MainWindow(QMainWindow):
             self.flow_panel.load(state)
             self.solver_panel.load(state)
             self.controls_panel.load(state)
+            self.highlift_panel.load(state)
             self.solver_combo.setCurrentIndex(max(self.solver_combo.findData(state.solver.solver), 0))
             self.engine_combo.setCurrentIndex(max(self.engine_combo.findData(state.solver.engine), 0))
             self.project_name, self.notes = state.name, state.notes
@@ -428,6 +443,7 @@ class MainWindow(QMainWindow):
         try:
             self.wing_panel.set_system(self.system)
             self.flow_panel.set_system(self.system)
+            self.highlift_panel.set_system(self.system)
             self.airfoil_panel.set_stations(self.wing_panel.station_labels())
         finally:
             self._loading = False
@@ -452,7 +468,8 @@ class MainWindow(QMainWindow):
 
     def _collect_problems(self, state: ProjectState) -> list[str]:
         problems = (
-            self.wing_panel.problems() + self.controls_panel.problems() + self.flow_panel.problems() + self.solver_panel.problems()
+            self.wing_panel.problems() + self.controls_panel.problems() + self.highlift_panel.problems()
+            + self.flow_panel.problems() + self.solver_panel.problems()
         )
         if problems:
             return problems
@@ -579,7 +596,11 @@ class MainWindow(QMainWindow):
         if self.last is not None and self.last.result.request.wing == wing and not self._stale:
             result = self.last.result
         system = self.system
-        canvas.draw_with(lambda fig, th: plot_planform(fig, result, wing, system, th))
+        try:
+            high_lift = self.collect_state().high_lift.system()
+        except ProjectError:
+            high_lift = None
+        canvas.draw_with(lambda fig, th: plot_planform(fig, result, wing, system, th, high_lift))
 
     def _draw_spanwise(self) -> None:
         canvas = self.canvases["spanwise"]
@@ -813,6 +834,60 @@ class MainWindow(QMainWindow):
             dlg.show()
         return dlg
 
+    def high_lift_report(self, modal: bool = True) -> ReportDialog | None:
+        """Takeoff / landing stall analysis of the High lift tab: clean wing against the wing with its devices out."""
+        state = self._ready_state("the stall analysis")
+        if state is None:
+            return None
+        if not state.high_lift.active:
+            QMessageBox.information(self, APP_TITLE, "Tick 'Deploy trailing-edge flaps' and/or 'Deploy leading-edge slats' first.")
+            return None
+        clean = state.copy()
+        clean.high_lift.flaps_on = clean.high_lift.slats_on = False
+        system = state.high_lift.system()
+        weight = state.high_lift.weight_N
+        speed_unit = units.display_unit(self.system, "speed")
+        dlg = ReportDialog("Takeoff and landing stall", self)
+        cancel = {"flag": False}
+        dlg.finished.connect(lambda _r: cancel.update(flag=True))
+
+        def work(progress):
+            return compute_high_lift_report(
+                self.backend.build_request(clean), self.backend.build_request(state), system, weight=weight,
+                progress=progress, cancelled=lambda: cancel["flag"],
+            )
+
+        def done(rep) -> None:
+            weight_unit = units.display_unit(self.system, "force")
+            text = format_high_lift_report(rep, speed_unit, float(units.from_si("speed", 1.0, speed_unit)),
+                                           weight_unit, float(units.from_si("force", 1.0, weight_unit)))
+            dlg.finish(text, "Finished")
+            summary = (f"CL_max clean {rep.clean.CL_max:.3f} &rarr; devices out <b>{rep.deployed.CL_max:.3f}</b> "
+                       f"({rep.dCL_max:+.3f}; handbook estimate {rep.estimate.dCL_max:+.3f})")
+            if rep.weight:
+                vs = units.from_si("speed", rep.stall_speed(), speed_unit)
+                summary += f"; stall speed <b>{vs:.1f} {speed_unit}</b>"
+            self.highlift_panel.show_summary(summary)
+            self.results.log(f"stall analysis: CL_max {rep.clean.CL_max:.3f} clean, {rep.deployed.CL_max:.3f} with devices")
+
+        def failed(msg: str) -> None:
+            dlg.finish("cancelled" if "cancelled" in msg else msg, "Stopped" if "cancelled" in msg else "Failed")
+
+        task = FuncTask(work)
+        task.signals.progress.connect(dlg.set_progress)
+        task.signals.finished.connect(done)
+        task.signals.failed.connect(failed)
+        self._tasks.append(task)
+
+        def forget(*_args) -> None:
+            if task in self._tasks:
+                self._tasks.remove(task)
+
+        task.signals.finished.connect(forget)
+        task.signals.failed.connect(forget)
+        self.pool.start(task)  # the analyses' own single-thread pool: never two solutions at once
+        return self._show_report(dlg, modal)
+
     def run_self_test(self, modal: bool = True) -> ReportDialog:
         """Run the built-in validation suite (analytic benchmarks) and show the report."""
         dlg = ReportDialog("Self-test", self)
@@ -948,6 +1023,48 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_TITLE, f"Could not write the report:\n{exc}")
             return
         self.results.log(f"exported {path} ({pages} pages)")
+
+    def export_stl(self, path: str | None = None, options: dict | None = None) -> MeshInfo | None:
+        """Write the wing described in the inputs as an STL surface model (options and file asked for when not given)."""
+        state = self.collect_state()
+        problems = self.wing_panel.problems()
+        if not problems:
+            try:
+                wing = state.build_wing()
+            except ProjectError as exc:
+                problems = [str(exc)]
+        if problems:
+            QMessageBox.information(self, APP_TITLE, "Fix the wing before exporting it:\n\n" + "\n".join(problems))
+            return None
+        airfoils = []
+        for i, key in enumerate(state.airfoils.keys[: len(wing.sections)]):
+            try:
+                airfoils.append(self.backend.resolve(key).airfoil)
+            except Exception as exc:  # a missing or broken airfoil must not take the window down
+                QMessageBox.information(self, APP_TITLE, f"The airfoil of section {i + 1} ({key!r}) cannot be used:\n{exc}")
+                return None
+        if options is None:
+            dlg = StlExportDialog(wing.span, self)
+            if dlg.exec() != StlExportDialog.Accepted:
+                return None
+            options = dlg.options()
+        if not path:
+            start = str(Path(self.settings.get_str("files/last_dir", "")) / f"{self.project_name}.stl")
+            path, _ = QFileDialog.getSaveFileName(self, "Export wing as STL", start, "STL models (*.stl)")
+            if not path:
+                return None
+            if not path.lower().endswith(".stl"):
+                path += ".stl"
+        try:
+            info = export_wing_stl(path, wing, airfoils, **options)
+        except (OSError, StlError) as exc:
+            QMessageBox.warning(self, APP_TITLE, f"Could not export the model:\n{exc}")
+            return None
+        self.results.log(
+            f"exported {path}: {info.n_triangles} triangles, {'watertight' if info.watertight else 'NOT watertight'}, "
+            f"volume {info.volume_m3:.4g} m^3 at full size"
+        )
+        return info
 
     # ========================================================================== help
     def show_conventions(self) -> None:

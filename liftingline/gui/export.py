@@ -121,7 +121,8 @@ def export_pdf(
     with PdfPages(path, metadata={"Title": f"{state.name} - lifting-line analysis", "Creator": f"Lifting-Line Wing Calculator {__version__}"}) as pdf:
         for fig in (
             _summary_page(state, result, infos, system),
-            _plot_page("Planform and lift loading", lambda f: plot_planform(f, result, wing, system, theme)),
+            _plot_page("Planform and lift loading",
+                       lambda f: plot_planform(f, result, wing, system, theme, getattr(result.request.section, "high_lift", None))),
             _plot_page("Spanwise distributions", lambda f: plot_spanwise(f, result, system, theme)),
             _plot_page(
                 "Section airfoils",

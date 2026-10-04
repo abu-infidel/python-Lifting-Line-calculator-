@@ -109,6 +109,9 @@ def totals_rows(result: AnalysisResult, system: str = "SI") -> list[Row]:
         Row(g, "Mach number", "", "", "M", fmt(flow.mach, 3), "", "Mach", None, flow.mach),
         Row(g, "Root angle of attack", fmt(t.alpha_deg, 4), "deg", "", "", "Flow angle of attack plus root incidence", "alpha_deg", t.alpha_deg, None),
     ]
+    if result.info.get("high_lift"):
+        rows.append(Row(g, "High-lift devices", str(result.info["high_lift"]), "", "", "",
+                        f"Deployed (High lift tab): {result.info['high_lift']}", "high_lift", None, None))
     return rows
 
 
@@ -164,11 +167,15 @@ def result_to_csv(result: AnalysisResult, system: str = "SI", project_name: str 
     if project_name:
         w.writerow(["# project", project_name])
     w.writerow(["# solver", result.solver_used, "section data", result.info.get("section_engine", "")])
+    if result.info.get("high_lift"):
+        w.writerow(["# high-lift devices", result.info["high_lift"]])
     for note in result.warnings:
         w.writerow(["# warning", note])
     w.writerow([])
     w.writerow(["quantity", "SI value", "coefficient"])
     for r in totals_rows(result, system):
+        if r.key == "high_lift":  # text, written in the header above
+            continue
         w.writerow([r.key or r.label.strip(), _num(r.si_value), _num(r.coeff_value)])
     w.writerow([])
     table = spanwise_table(result)

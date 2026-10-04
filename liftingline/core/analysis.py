@@ -97,6 +97,16 @@ def run(req: AnalysisRequest) -> AnalysisResult:
     info["nonlinear"] = nonlinear
     for note in getattr(req.section, "notes", ()):
         warnings.append(note)
+    high_lift = getattr(req.section, "high_lift", None)
+    if high_lift is not None:
+        from .highlift import MACH_WARNING
+
+        info["high_lift"] = high_lift.short_label()
+        if flow.mach > MACH_WARNING:
+            warnings.append(
+                f"High-lift devices deployed at Mach {flow.mach:.2f}: flaps and slats are takeoff and landing devices "
+                f"(placard speeds are far below Mach {MACH_WARNING}); their published increments do not apply here."
+            )
 
     reasons = needs_numerical_solver(req)
     solver = req.solver

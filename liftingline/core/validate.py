@@ -242,6 +242,58 @@ def _pipeline(c: _Collector) -> None:
     c.close("lift is the integral of the spanwise load", t.L, float(np.sum((sec.force_kj + sec.force_profile)[:, 2] * math.cos(math.radians(t.alpha_deg)))) - float(np.sum((sec.force_kj + sec.force_profile)[:, 0] * math.sin(math.radians(t.alpha_deg)))), rel=1e-9)
 
 
+def _high_lift_and_stl(c: _Collector) -> None:
+    c.group = "High-lift devices and 3-D model export"
+    from ..io.backend import Backend
+    from ..io.project import ProjectState
+    from ..io.stl import is_watertight, signed_volume, wing_mesh
+    from .highlift import (
+        FLAP_TYPES, LANDING, SLAT_TYPES, TAKEOFF, Device, HighLiftSection, HighLiftSystem, high_lift_report,
+    )
+
+    c.close("Raymer Table 12.2: single-slotted flap d(cl_max)", 1.3, FLAP_TYPES["slotted"].dcl_max, abs_tol=0.0)
+    fow = HighLiftSystem(LANDING, flaps=Device("fowler", 0.0, 0.6, 0.3, 1.2))
+    c.close("Raymer Table 12.2: Fowler flap d(cl_max) = 1.3 c'/c", 1.3 * 1.2, fow.flap_dcl_max(), rel=1e-12)
+    sl = HighLiftSystem(TAKEOFF, slats=Device("slat", 0.0, 1.0, chord_extension=1.1))
+    c.close("Raymer Table 12.2: slat d(cl_max) = 0.4 c'/c", 0.4 * 1.1, sl.slat_dcl_max(), rel=1e-12)
+    c.true("published leading-edge values: fixed slot 0.2, leading-edge flap 0.3, Krueger 0.3",
+           [SLAT_TYPES[k].dcl_max for k in ("fixed_slot", "le_flap", "krueger")] == [0.2, 0.3, 0.3])
+
+    wing = Wing.trapezoid(10.0, 1.6, 0.8)
+    sec = LinearSection(a0=6.0, alpha_L0=-2.0 * DEG, cl_max=1.6)
+    hl = HighLiftSection(sec, HighLiftSystem(LANDING, flaps=Device("slotted", 0.0, 1.0)), wing.half_span)
+    c.close("full-span flap = clean wing at 15 deg more angle of attack (zero-lift angle shift)",
+            _totals(wing, 17.0, sec, nonlinear=False).CL, _totals(wing, 2.0, hl, nonlinear=False).CL, rel=1e-9)
+
+    be = Backend()
+    st = ProjectState()
+    st.wing.span, st.wing.root_chord, st.wing.tip_chord = 12.0, 1.5, 1.5
+    st.wing.sync()
+    st.solver.engine = "builtin"
+    st.flow.V = 30.0
+    ref = run(be.build_request(st)).totals
+    off = st.copy()
+    off.high_lift.flap_type, off.high_lift.phase = "triple_slotted", TAKEOFF  # configured, but retracted
+    t_off = run(be.build_request(off)).totals
+    c.true("retracted devices leave the result bit-for-bit unchanged", (t_off.CL, t_off.CD, t_off.Cm) == (ref.CL, ref.CD, ref.Cm))
+    on = st.copy()
+    on.high_lift.flaps_on = on.high_lift.slats_on = True
+    t_on = run(be.build_request(on)).totals
+    c.close("deployed devices are symmetric: no rolling moment", 0.0, t_on.C_roll, abs_tol=1e-9)
+    flaps = st.copy()
+    flaps.high_lift.flaps_on, flaps.high_lift.flap_y_out = True, 0.6
+    rep = high_lift_report(be.build_request(st), be.build_request(flaps), flaps.high_lift.system())
+    c.close("wing CL_max gain of 60 %-span slotted flaps vs Raymer's estimate 0.9 d(cl_max) S'/S (+-25 %)",
+            rep.estimate.dCL_max, rep.dCL_max, rel=0.25)
+
+    af = be.resolve("NACA 0012").airfoil
+    V, F = wing_mesh(Wing.rectangular(8.0, 1.0), [af, af], n_chord=60, n_span=8)
+    x = np.linspace(0.0, 1.0, 4001)
+    area = float(np.sum(0.5 * (af.thickness(x)[1:] + af.thickness(x)[:-1]) * np.diff(x)))
+    c.true("STL model of a wing is closed and consistently oriented (watertight)", is_watertight(F))
+    c.close("STL model volume = airfoil area x chord^2 x span", area * 8.0, signed_volume(V, F), rel=2e-3)
+
+
 GROUPS: tuple[tuple[str, Callable[[_Collector], None]], ...] = (
     ("classical", _classical),
     ("numerical", _numerical),
@@ -249,6 +301,7 @@ GROUPS: tuple[tuple[str, Callable[[_Collector], None]], ...] = (
     ("airfoils", _airfoils),
     ("engines", _engines),
     ("pipeline", _pipeline),
+    ("high lift and STL", _high_lift_and_stl),
 )
 
 

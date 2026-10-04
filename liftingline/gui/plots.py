@@ -58,9 +58,29 @@ def lift_loading(result: AnalysisResult):
     return y, lprime, ell
 
 
-def plot_planform(fig: Figure, result: AnalysisResult | None, wing, system: str, theme: Theme) -> None:
+def _draw_devices(ax, wing, high_lift, L, theme: Theme) -> None:
+    """Hatched outlines of the deployed flaps (rear strip of the chord) and slats (front strip) on both wings."""
+    hs = wing.half_span
+    strips = []
+    if high_lift.flaps is not None:
+        f = high_lift.flaps
+        strips.append((f.y_in, f.y_out, 1.0 - f.chord_fraction, 1.0, "flaps", "////"))
+    if high_lift.slats is not None:
+        sl = high_lift.slats
+        strips.append((sl.y_in, sl.y_out, 0.0, 0.15, "slats", "\\\\"))
+    for e0, e1, c0, c1, label, hatch in strips:
+        for side in (-1.0, 1.0):
+            yy = side * np.linspace(e0 * hs, e1 * hs, 40)
+            front = wing.x_le(yy) + c0 * wing.chord(yy)
+            back = wing.x_le(yy) + c1 * wing.chord(yy)
+            ax.fill(np.r_[L(yy), L(yy[::-1])], -np.r_[L(front), L(back[::-1])], facecolor="none", edgecolor=theme.fg,
+                    hatch=hatch, lw=0.8, zorder=4, label=label if side > 0 else None)
+
+
+def plot_planform(fig: Figure, result: AnalysisResult | None, wing, system: str, theme: Theme, high_lift=None) -> None:
     """Top view with the lift coefficient (or stall margin) painted on the wing, the loading under it and a
-    front view for dihedral. Without a result only the geometry is drawn."""
+    front view for dihedral. Without a result only the geometry is drawn. Deployed high-lift devices (a
+    :class:`~liftingline.core.highlift.HighLiftSystem`) are outlined on the planform."""
     fig.clear()
     fig.set_facecolor(theme.bg)
     unit, L = _length(system)
@@ -114,6 +134,8 @@ def plot_planform(fig: Figure, result: AnalysisResult | None, wing, system: str,
         for s_ in (-1, 1):
             ys = s_ * sec.y
             ax.plot([L(ys)] * 2, [-L(wing.x_le(ys)), -L(wing.x_le(ys) + wing.chord(ys))], color=theme.muted, lw=0.7, zorder=3)
+    if high_lift is not None:
+        _draw_devices(ax, wing, high_lift, L, theme)
     ymac, xmac = wing.y_mac, wing.x_le_mac
     for s_ in (-1, 1):
         ax.plot([L(s_ * ymac)] * 2, [-L(xmac), -L(xmac + wing.mac)], color=theme.bad, lw=2.0, zorder=5, label="mean aerodynamic chord" if s_ == 1 else None)

@@ -16,6 +16,7 @@ from typing import Any
 
 from ..core.controls import validate_rows as validate_control_rows
 from ..core.flow import FlowCondition
+from ..core.highlift import LANDING, HighLiftError, HighLiftSystem
 from ..core.wing import KIND_ELLIPTIC, Section, Wing
 
 SCHEMA_VERSION = 1
@@ -291,6 +292,54 @@ class SolverSpec:
     xtr_lower: float = 1.0
 
 
+# ================================================================================ high lift
+@dataclass
+class HighLiftSpec:
+    """Deployable high-lift devices (both off by default): trailing-edge flaps and leading-edge slats."""
+
+    phase: str = LANDING  # "takeoff" or "landing" setting
+    flaps_on: bool = False
+    flap_type: str = "slotted"  # key of core.highlift.FLAP_TYPES
+    flap_y_in: float = 0.0  # fraction of the semi-span
+    flap_y_out: float = 0.6
+    flap_chord_fraction: float = 0.3  # flap chord / local chord
+    flap_chord_extension: float = 1.0  # c'/c (Fowler-type flaps)
+    slats_on: bool = False
+    slat_type: str = "slat"  # key of core.highlift.SLAT_TYPES
+    slat_y_in: float = 0.0
+    slat_y_out: float = 1.0
+    slat_chord_extension: float = 1.1  # c'/c (slats)
+    weight_N: float = 0.0  # aircraft weight for the stall speeds (0 = not given)
+
+    @property
+    def active(self) -> bool:
+        return bool(self.flaps_on or self.slats_on)
+
+    def system(self) -> HighLiftSystem | None:
+        """The deployed devices, or None when both are retracted (raises :class:`ProjectError` if invalid)."""
+        if not self.active:
+            return None
+        flaps = dict(type=self.flap_type, y_in=self.flap_y_in, y_out=self.flap_y_out,
+                     chord_fraction=self.flap_chord_fraction, chord_extension=self.flap_chord_extension)
+        slats = dict(type=self.slat_type, y_in=self.slat_y_in, y_out=self.slat_y_out,
+                     chord_extension=self.slat_chord_extension)
+        try:
+            return HighLiftSystem.from_spec(self.phase, flaps if self.flaps_on else None, slats if self.slats_on else None)
+        except HighLiftError as exc:
+            raise ProjectError(str(exc)) from exc
+
+    def problems(self) -> list[str]:
+        if not self.active:
+            return []
+        try:
+            self.system()
+        except ProjectError as exc:
+            return [str(exc)]
+        if self.weight_N < 0.0 or not math.isfinite(self.weight_N):
+            return ["the weight must be zero (not given) or positive"]
+        return []
+
+
 # ===================================================================================== project
 @dataclass
 class ProjectState:
@@ -301,6 +350,7 @@ class ProjectState:
     name: str = "Untitled"
     notes: str = ""
     controls: list[dict[str, Any]] = field(default_factory=list)  # control surfaces (see core.controls.ControlSurface)
+    high_lift: HighLiftSpec = field(default_factory=HighLiftSpec)
 
     def __post_init__(self) -> None:
         self.airfoils.fit(self.wing.n_sections())
@@ -322,6 +372,7 @@ class ProjectState:
             flow=dump(self.flow),
             solver=dump(self.solver),
             controls=copy.deepcopy(self.controls),
+            high_lift=dump(self.high_lift),
         )
 
     @classmethod
@@ -348,6 +399,7 @@ class ProjectState:
             name=str(data.get("name", "Untitled")),
             notes=str(data.get("notes", "")),
             controls=[dict(c) for c in (data.get("controls") or []) if isinstance(c, dict)],
+            high_lift=load(HighLiftSpec, data.get("high_lift") if isinstance(data.get("high_lift"), dict) else None),
         )
         state.wing.sync()
         state.airfoils.fit(state.wing.n_sections())
@@ -400,4 +452,5 @@ class ProjectState:
         if f.ref_mode == REF_ABSOLUTE and not math.isfinite(f.ref_x_abs_m):
             problems.append("Flow: the moment reference point must be a number")
         problems += [f"Controls: {m}" for m in validate_control_rows(self.controls)]
+        problems += [f"High lift: {m}" for m in self.high_lift.problems()]
         return problems
