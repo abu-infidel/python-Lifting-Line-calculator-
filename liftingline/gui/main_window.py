@@ -7,10 +7,12 @@ The window owns no physics. It collects a :class:`ProjectState` from the panels,
 
 from __future__ import annotations
 
+import sys
+import tempfile
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QThreadPool, QTimer, Qt
+from PySide6.QtCore import QProcess, QThreadPool, QTimer, Qt
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -41,7 +43,6 @@ from ..io.backend import Backend
 from ..io.presets import PRESETS, light_aircraft
 from ..io.project import MODE_SECTIONS, AirfoilSpec, ProjectError, ProjectState
 from ..io.report import result_to_csv
-from ..io.stl import MeshInfo, StlError, export_wing_stl
 from .airfoil_panel import AirfoilPanel
 from .compare_view import CompareView
 from .controls_panel import ControlsPanel
@@ -55,7 +56,6 @@ from .polars_view import PolarsView
 from .results_view import ResultsView
 from .settings import Settings
 from .solver_panel import SolverPanel
-from .stl_dialog import StlExportDialog
 from .theme import apply_theme, current_theme
 from .widgets import set_role
 from .wing_panel import WingPanel
@@ -163,6 +163,7 @@ class MainWindow(QMainWindow):
                 self.restoreGeometry(geo)
             if state is not None:
                 self.restoreState(state)
+        self.prefer_maximized = self.fit_to_screen()
 
         self.apply_state(light_aircraft())
         self._dirty = False
@@ -174,6 +175,29 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.request_run)
 
     # ======================================================================== layout
+    def fit_to_screen(self) -> bool:
+        """Keep the whole window on the screen it opens on (16:9 laptops from 1280 x 720 up, any scaling).
+
+        Shrinks and centres the window when it is larger than the available area; returns True when even the
+        smallest usable layout fills most of the screen, in which case the window should open maximised."""
+        from PySide6.QtGui import QGuiApplication
+
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return False
+        avail = screen.availableGeometry()
+        w = min(self.width(), int(avail.width() * 0.96))
+        h = min(self.height(), int(avail.height() * 0.94))
+        w, h = max(w, min(self.minimumSizeHint().width(), avail.width())), max(h, min(self.minimumSizeHint().height(), avail.height()))
+        if (w, h) != (self.width(), self.height()):
+            self.resize(w, h)
+        x = min(max(self.x(), avail.left()), avail.right() - w + 1)
+        y = min(max(self.y(), avail.top()), avail.bottom() - h + 1)
+        if not avail.contains(self.frameGeometry()):
+            x, y = avail.left() + (avail.width() - w) // 2, avail.top() + (avail.height() - h) // 2
+        self.move(max(x, avail.left()), max(y, avail.top()))
+        return avail.width() < 1500 or avail.height() < 860
+
     def _build_panels(self) -> None:
         self.wing_panel = WingPanel(self.system)
         self.airfoil_panel = AirfoilPanel(self.backend)
@@ -193,19 +217,23 @@ class MainWindow(QMainWindow):
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
             scroll.setFrameShape(QScrollArea.NoFrame)
-            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)  # nothing is ever cut off on a narrow dock
             scroll.setWidget(panel)
             self.input_tabs.addTab(scroll, title)
+        # every input tab stays visible (no scroll arrows hiding some of them): the dock widens to fit the tab bar
+        self.input_tabs.tabBar().setUsesScrollButtons(False)
+        self.input_tabs.tabBar().setElideMode(Qt.ElideNone)
         dock = QDockWidget("Inputs", self)
         dock.setObjectName("inputs-dock")
         dock.setWidget(self.input_tabs)
-        dock.setMinimumWidth(380)
+        dock.setMinimumWidth(340)
         self.addDockWidget(Qt.LeftDockWidgetArea, dock)
         self.inputs_dock = dock
 
         for panel in (self.wing_panel, self.airfoil_panel, self.controls_panel, self.highlift_panel, self.flow_panel, self.solver_panel):
             panel.changed.connect(self._on_changed)
         self.highlift_panel.report_requested.connect(self.high_lift_report)
+        self.controls_panel.high_lift_requested.connect(self.show_high_lift)
         self.wing_panel.sections_changed.connect(self._sync_stations)
         self.wing_panel.preset_requested.connect(self._apply_preset)
         self.airfoil_panel.selection_changed.connect(lambda _i: self._invalidate_views("airfoils"))
@@ -232,6 +260,8 @@ class MainWindow(QMainWindow):
         self.plot_tabs.addTab(self.compare, "Compare")
         self._sweep_cancel = False
         self._sweeping = False
+        self.plot_tabs.tabBar().setUsesScrollButtons(False)  # all plot tabs visible, none behind scroll arrows
+        self.plot_tabs.tabBar().setElideMode(Qt.ElideNone)
         self.plot_tabs.currentChanged.connect(lambda _i: self._draw_visible())
         self.setCentralWidget(self.plot_tabs)
         self._stale_views: set[str] = {"planform", "spanwise", "airfoils"}
@@ -241,7 +271,7 @@ class MainWindow(QMainWindow):
         dock = QDockWidget("Results", self)
         dock.setObjectName("results-dock")
         dock.setWidget(self.results)
-        dock.setMinimumWidth(360)
+        dock.setMinimumWidth(300)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         self.results_dock = dock
 
@@ -261,6 +291,10 @@ class MainWindow(QMainWindow):
         self.act_auto.setToolTip("Re-run automatically a moment after every change")
         self.act_auto.toggled.connect(self._autorun_toggled)
         tb.addAction(self.act_auto)
+        self.act_stl = QAction(self.style().standardIcon(QStyle.SP_DialogSaveButton), "3-D model (STL)", self)
+        self.act_stl.setToolTip("Open the wing in the 3-D model exporter (a separate app) to write an STL file")
+        self.act_stl.triggered.connect(lambda: self.open_stl_exporter())
+        tb.addAction(self.act_stl)
         tb.addSeparator()
 
         tb.addWidget(QLabel(" Solver "))
@@ -307,7 +341,7 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         self._add_action(m, "Export results as &CSV...", self.export_csv)
         self._add_action(m, "Export &report as PDF...", self.export_pdf_report)
-        self._add_action(m, "Export wing as 3-D &model (STL)...", self.export_stl)
+        self._add_action(m, "Export wing as 3-D &model (STL)...", self.open_stl_exporter)
         m.addSeparator()
         self._add_action(m, "&Quit", self.close, "Ctrl+Q")
         self._refresh_recent_menu()
@@ -322,6 +356,8 @@ class MainWindow(QMainWindow):
         self._add_action(m, "&Trim: find angle of attack or speed...", self.open_trim, "Ctrl+T")
         self._add_action(m, "&Ideal twist for an elliptic load...", self.open_ideal_twist)
         self._add_action(m, "&Pin result for comparison", self.pin_result, "Ctrl+P")
+        self._add_action(m, "3-D &model exporter (STL)...", self.open_stl_exporter)
+        self._add_action(m, "&High lift: flaps and slats", lambda: self.show_high_lift("slats"))
         m.addSeparator()
         self._add_action(m, "Airfoil library &folder...", self.choose_library_folder)
         self._add_action(m, "Library &health check...", self.library_health_check)
@@ -600,7 +636,15 @@ class MainWindow(QMainWindow):
             high_lift = self.collect_state().high_lift.system()
         except ProjectError:
             high_lift = None
-        canvas.draw_with(lambda fig, th: plot_planform(fig, result, wing, system, th, high_lift))
+        airfoils = self._section_airfoils(wing)
+        canvas.draw_with(lambda fig, th: plot_planform(fig, result, wing, system, th, high_lift, airfoils))
+
+    def _section_airfoils(self, wing):
+        """The airfoil of every wing section for the views, or None when one cannot be resolved yet."""
+        try:
+            return [self.backend.resolve(s.airfoil).airfoil for s in wing.sections]
+        except Exception:  # an unknown key is reported by the Airfoils tab; the views fall back to chord lines
+            return None
 
     def _draw_spanwise(self) -> None:
         canvas = self.canvases["spanwise"]
@@ -834,6 +878,15 @@ class MainWindow(QMainWindow):
             dlg.show()
         return dlg
 
+    def show_high_lift(self, device: str = "slats") -> None:
+        """Open the High lift tab with the slats (or the high-lift flaps) deployed."""
+        for i in range(self.input_tabs.count()):
+            if self.input_tabs.tabText(i) == "High lift":
+                self.input_tabs.setCurrentIndex(i)
+        box = self.highlift_panel.slat_box if device == "slats" else self.highlift_panel.flap_box
+        if not box.isChecked():
+            box.setChecked(True)  # emits changed: the analysis re-runs with the device out
+
     def high_lift_report(self, modal: bool = True) -> ReportDialog | None:
         """Takeoff / landing stall analysis of the High lift tab: clean wing against the wing with its devices out."""
         state = self._ready_state("the stall analysis")
@@ -1024,47 +1077,42 @@ class MainWindow(QMainWindow):
             return
         self.results.log(f"exported {path} ({pages} pages)")
 
-    def export_stl(self, path: str | None = None, options: dict | None = None) -> MeshInfo | None:
-        """Write the wing described in the inputs as an STL surface model (options and file asked for when not given)."""
+    def open_stl_exporter(self, launch: bool = True) -> tuple[str, list[str]] | None:
+        """Send the wing described in the inputs to the separate 3-D model exporter app (its own process, so the
+        calculator never waits for meshing). Returns the command that was started."""
         state = self.collect_state()
         problems = self.wing_panel.problems()
         if not problems:
             try:
-                wing = state.build_wing()
+                state.build_wing()
             except ProjectError as exc:
                 problems = [str(exc)]
         if problems:
             QMessageBox.information(self, APP_TITLE, "Fix the wing before exporting it:\n\n" + "\n".join(problems))
             return None
-        airfoils = []
-        for i, key in enumerate(state.airfoils.keys[: len(wing.sections)]):
-            try:
-                airfoils.append(self.backend.resolve(key).airfoil)
-            except Exception as exc:  # a missing or broken airfoil must not take the window down
-                QMessageBox.information(self, APP_TITLE, f"The airfoil of section {i + 1} ({key!r}) cannot be used:\n{exc}")
-                return None
-        if options is None:
-            dlg = StlExportDialog(wing.span, self)
-            if dlg.exec() != StlExportDialog.Accepted:
-                return None
-            options = dlg.options()
-        if not path:
-            start = str(Path(self.settings.get_str("files/last_dir", "")) / f"{self.project_name}.stl")
-            path, _ = QFileDialog.getSaveFileName(self, "Export wing as STL", start, "STL models (*.stl)")
-            if not path:
-                return None
-            if not path.lower().endswith(".stl"):
-                path += ".stl"
+        folder = Path(tempfile.gettempdir()) / "liftingline-3d-export"
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in (self.project_name or "wing")) or "wing"
         try:
-            info = export_wing_stl(path, wing, airfoils, **options)
-        except (OSError, StlError) as exc:
-            QMessageBox.warning(self, APP_TITLE, f"Could not export the model:\n{exc}")
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{safe}.json"
+            state.save(path)
+        except OSError as exc:
+            QMessageBox.warning(self, APP_TITLE, f"Could not hand the wing to the exporter:\n{exc}")
             return None
-        self.results.log(
-            f"exported {path}: {info.n_triangles} triangles, {'watertight' if info.watertight else 'NOT watertight'}, "
-            f"volume {info.volume_m3:.4g} m^3 at full size"
-        )
-        return info
+        args = ["-m", "liftingline.stl_app", str(path)]
+        library = self.settings.get_str("library/folder", "")
+        if library:
+            args += ["--library", library]
+        if launch:
+            workdir = str(Path(__file__).resolve().parents[2])  # the folder holding the liftingline package
+            started = QProcess.startDetached(sys.executable, args, workdir)
+            ok = started[0] if isinstance(started, tuple) else bool(started)
+            if not ok:
+                QMessageBox.warning(self, APP_TITLE, "The 3-D model exporter could not be started.\n"
+                                    f"Run it yourself:  python stl_exporter.py \"{path}\"")
+                return None
+            self.results.log(f"3-D model exporter opened with the current wing ({path.name})")
+        return sys.executable, args
 
     # ========================================================================== help
     def show_conventions(self) -> None:

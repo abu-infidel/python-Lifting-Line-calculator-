@@ -77,25 +77,31 @@ def _draw_devices(ax, wing, high_lift, L, theme: Theme) -> None:
                     hatch=hatch, lw=0.8, zorder=4, label=label if side > 0 else None)
 
 
-def plot_planform(fig: Figure, result: AnalysisResult | None, wing, system: str, theme: Theme, high_lift=None) -> None:
-    """Top view with the lift coefficient (or stall margin) painted on the wing, the loading under it and a
-    front view for dihedral. Without a result only the geometry is drawn. Deployed high-lift devices (a
-    :class:`~liftingline.core.highlift.HighLiftSystem`) are outlined on the planform."""
+def plot_planform(fig: Figure, result: AnalysisResult | None, wing, system: str, theme: Theme, high_lift=None,
+                  airfoils: Sequence[Airfoil] | None = None) -> None:
+    """Top view with the lift coefficient (or stall margin) painted on the wing, the loading under it, and a front
+    view and a side view of the wing built from its real sections (``airfoils``: one per wing section) - thickness,
+    twist and incidence, sweep, dihedral and the tip airfoil all show. Without a result only the geometry is drawn.
+    Deployed high-lift devices (a :class:`~liftingline.core.highlift.HighLiftSystem`) are outlined on the planform."""
     fig.clear()
     fig.set_facecolor(theme.bg)
     unit, L = _length(system)
+    compact = is_compact(fig)
+    widths = [1.25, 1.0] if compact else [1.75, 1.0]
     if result is not None:
-        gs = fig.add_gridspec(3, 1, height_ratios=[1.0, 1.15, 0.8])
-        ax = fig.add_subplot(gs[0])
-        axl = fig.add_subplot(gs[1], sharex=ax)
-        axf = fig.add_subplot(gs[2], sharex=ax)
-        axes = (ax, axl, axf)
+        gs = fig.add_gridspec(3, 2, height_ratios=[1.0, 1.1, 0.95], width_ratios=widths)
+        ax = fig.add_subplot(gs[0, :])
+        axl = fig.add_subplot(gs[1, :], sharex=ax)
+        axf = fig.add_subplot(gs[2, 0])
+        axs = fig.add_subplot(gs[2, 1])
+        axes = (ax, axl, axf, axs)
     else:
-        gs = fig.add_gridspec(2, 1, height_ratios=[1.3, 1.0])
-        ax = fig.add_subplot(gs[0])
-        axf = fig.add_subplot(gs[1], sharex=ax)
+        gs = fig.add_gridspec(2, 2, height_ratios=[1.3, 1.0], width_ratios=widths)
+        ax = fig.add_subplot(gs[0, :])
+        axf = fig.add_subplot(gs[1, 0])
+        axs = fig.add_subplot(gs[1, 1])
         axl = None
-        axes = (ax, axf)
+        axes = (ax, axf, axs)
     for a in axes:
         style_axes(a, theme)
 
@@ -151,8 +157,9 @@ def plot_planform(fig: Figure, result: AnalysisResult | None, wing, system: str,
         f"{units.display_unit(system, 'area')}, AR = {wing.aspect_ratio:.3g}, c/4 sweep {sweep[0]:.1f}\N{DEGREE SIGN}",
         fontsize=10,
     )
-    handles, labels = ax.get_legend_handles_labels()
-    leg = fig.legend(handles, labels, loc="outside lower center", ncol=3, fontsize=7, frameon=False)
+    handles, labels = ax.get_legend_handles_labels()  # the planform's own legend, right under the planform
+    leg = ax.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, -0.02),
+                    ncol=min(len(labels), 2 if compact else 5), fontsize=6.5 if compact else 7, frameon=False)
     for t in leg.get_texts():
         t.set_color(theme.muted)
     if mappable is not None:
@@ -174,18 +181,104 @@ def plot_planform(fig: Figure, result: AnalysisResult | None, wing, system: str,
         axl.set_ylim(bottom=0.0)
     ax.tick_params(labelbottom=False)
 
-    ys = np.linspace(-wing.half_span, wing.half_span, 201)
-    z = L(wing.z_c4(ys))
-    axf.plot(L(ys), z, color=theme.accent, lw=1.6)
-    axf.set_xlabel(f"y [{unit}]  (right wing to the right)")
-    axf.set_ylabel(f"z c/4 [{unit}]", fontsize=8)
-    axf.set_title("Front view (quarter-chord line)", fontsize=9)
-    zr = float(np.ptp(z))
-    if zr < 1e-9:
-        pad = 0.05 * float(np.ptp(L(ys)))
-        axf.set_ylim(-pad, pad)
+    _plot_front_view(axf, wing, airfoils, L, unit, theme, compact)
+    _plot_side_view(axs, wing, airfoils, L, unit, theme, compact)
+
+
+def _plot_front_view(axf, wing, airfoils, L, unit: str, theme: Theme, compact: bool = False) -> None:
+    """The wing seen from the front: the outline of every section (thickness, camber, twist + incidence) on the
+    quarter-chord line (dihedral). Heights are enlarged: the axis is not to scale."""
+    hs = wing.half_span
+    ys = np.unique(np.concatenate([-hs * np.cos(np.linspace(0.0, math.pi, 241)), [s.y for s in wing.sections],
+                                   [-s.y for s in wing.sections]]))
+    z4 = wing.z_c4(ys)
+    if airfoils is not None:
+        from ..core.sections3d import front_silhouette
+
+        try:
+            lo, hi = front_silhouette(wing, airfoils, ys)
+        except ValueError:
+            airfoils = None
+    if airfoils is not None:
+        axf.fill_between(L(ys), L(lo), L(hi), color=theme.series[0], alpha=0.35, lw=0.0, zorder=2)
+        axf.plot(L(ys), L(hi), color=theme.series[0], lw=1.1, zorder=3, label="wing outline (sections)")
+        axf.plot(L(ys), L(lo), color=theme.series[0], lw=1.1, zorder=3)
+        for sec in wing.sections:  # section stations
+            for sgn in (-1.0, 1.0):
+                k = int(np.argmin(np.abs(ys - sgn * sec.y)))
+                axf.plot([L(ys[k])] * 2, [L(lo[k]), L(hi[k])], color=theme.muted, lw=0.7, zorder=3)
+        axf.set_title("Front view (heights enlarged)" if compact else
+                      "Front view: sections with twist, incidence, dihedral (heights enlarged)", fontsize=8)
     else:
-        axf.margins(y=0.25)
+        axf.set_title("Front view (quarter-chord line; airfoils not available)", fontsize=8)
+    axf.plot(L(ys), L(z4), "--", color=theme.accent2, lw=1.0, zorder=4, label="quarter-chord line")
+    axf.set_xlabel(f"y [{unit}]" if compact else f"y [{unit}]  (right wing to the right)", fontsize=8)
+    axf.set_ylabel(f"z [{unit}]", fontsize=8)
+    axf.margins(x=0.02, y=0.3 if compact else 0.25)
+    if not compact:  # on a narrow canvas the dashed line explains itself (see the planform legend)
+        leg = axf.legend(fontsize=6.5, frameon=False, loc="upper center", ncol=2)
+        for t in leg.get_texts():
+            t.set_color(theme.muted)
+
+
+def _side_view_stations(wing) -> list[tuple[float, str]]:
+    """(y, label) of the sections drawn in the side view: root, every table section, tip (a zero-chord tip is
+    replaced by the section at 95 % of the semi-span)."""
+    out = []
+    n = len(wing.sections)
+    for i, sec in enumerate(wing.sections):
+        y = sec.y
+        if float(wing.chord(y)) <= 0.0:
+            y = 0.95 * wing.half_span
+        label = "root" if i == 0 else ("tip" if i == n - 1 else f"section {i + 1}")
+        if label == "tip" and y < sec.y:
+            label = "near tip (95 %)"
+        out.append((y, label))
+    return out
+
+
+def _plot_side_view(axs, wing, airfoils, L, unit: str, theme: Theme, compact: bool = False) -> None:
+    """The root and tip sections seen from the side, to scale: sweep moves the tip aft, dihedral up, twist turns it,
+    and the tip airfoil's own shape shows."""
+    axs.set_title("Side view (to scale)" if compact else "Side view: root and tip sections (to scale)", fontsize=8)
+    axs.set_xlabel(f"x [{unit}]" if compact else f"x [{unit}]  (aft to the right)", fontsize=8)
+    axs.set_ylabel(f"z [{unit}]", fontsize=8)
+    stations = _side_view_stations(wing)
+    shapes = None
+    if airfoils is not None:
+        from ..core.sections3d import section_shapes
+
+        try:
+            _frac, shapes = section_shapes(airfoils, 60)
+        except ValueError:
+            shapes = None
+    colors = {"root": theme.series[0], "tip": theme.series[3], "near tip (95 %)": theme.series[3]}
+    for y, label in stations:
+        color = colors.get(label, theme.muted)
+        main = label in colors
+        twist = float(wing.twist_deg(y)) + wing.incidence_deg
+        if shapes is not None:
+            from ..core.sections3d import section_outline
+
+            x, z = section_outline(wing, shapes, y)
+            i0, i1, xi = wing.airfoil_blend(np.array([y]))
+            name = airfoils[int(i1[0])].name if float(xi[0]) > 0.5 else airfoils[int(i0[0])].name
+            short = name.replace("NACA ", "") if compact else name
+            axs.plot(L(x), L(z), color=color, lw=1.4 if main else 0.8, zorder=3 if main else 2,
+                     label=f"{label}: {short}, {twist:+.1f}\N{DEGREE SIGN}" if main else None)
+        else:  # the chord line only
+            c = float(wing.chord(y))
+            th = math.radians(twist)
+            xa = np.array([0.0, 1.0])
+            x = float(wing.x_c4(y)) + (xa - 0.25) * c * math.cos(th)
+            z = float(wing.z_c4(y)) - (xa - 0.25) * c * math.sin(th)
+            axs.plot(L(x), L(z), color=color, lw=1.4 if main else 0.8, label=f"{label} chord, {twist:+.1f}\N{DEGREE SIGN}" if main else None)
+        axs.plot([L(float(wing.x_c4(y)))], [L(float(wing.z_c4(y)))], marker="+", color=color, ms=6, zorder=4)
+    axs.set_aspect("equal", adjustable="datalim")
+    axs.margins(0.08)
+    leg = axs.legend(fontsize=6 if compact else 6.5, frameon=False, loc="best")
+    for t in leg.get_texts():
+        t.set_color(theme.muted)
 
 
 # ================================================================================ spanwise
@@ -377,6 +470,17 @@ def plot_sweep(fig: Figure, sweep, theme: Theme, system: str = "SI", current: fl
 
 
 # =================================================================================== widget
+#: below this canvas width (logical pixels) plots use their compact layout
+COMPACT_WIDTH_PX = 720
+
+
+def is_compact(fig) -> bool:
+    """True when a figure (or sub-figure, as on report pages) is narrower than COMPACT_WIDTH_PX logical pixels."""
+    root = getattr(fig, "figure", None) or fig
+    ratio = getattr(root.canvas, "device_pixel_ratio", 1.0) or 1.0
+    return fig.bbox.width / ratio < COMPACT_WIDTH_PX
+
+
 def make_canvas(parent=None, toolbar: bool = True):
     """A Qt widget with a matplotlib figure (and optionally the navigation toolbar)."""
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
@@ -396,12 +500,24 @@ def make_canvas(parent=None, toolbar: bool = True):
             lay.addWidget(self.canvas, 1)
             self._last: Callable[[Figure, Theme], None] | None = None
             self.error: str = ""
+            self._compact: bool | None = None
+            self.canvas.mpl_connect("resize_event", self._resized)
+
+        def _resized(self, _event) -> None:
+            """Plots lay themselves out differently on narrow and wide canvases: redraw when that changes."""
+            compact = is_compact(self.figure)
+            if self._last is not None and self._compact is not None and compact != self._compact:
+                from PySide6.QtCore import QTimer
+
+                QTimer.singleShot(0, self.redraw)
+            self._compact = compact
 
         def draw_with(self, painter: Callable[[Figure, Theme], None] | None, placeholder: str = "") -> None:
             """Redraw with ``painter(fig, theme)``; a failure shows a message instead of raising."""
             theme = current_theme()
             self._last = painter
             self.error = ""
+            self._compact = is_compact(self.figure)
             try:
                 if painter is None:
                     message(self.figure, placeholder, theme)

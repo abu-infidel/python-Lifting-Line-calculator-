@@ -12,6 +12,7 @@ from liftingline.core.wing import Wing
 from liftingline.io.backend import Backend
 from liftingline.io.presets import PRESETS
 from liftingline.io.stl import (
+    MeshQuality,
     StlError,
     export_wing_stl,
     is_watertight,
@@ -70,7 +71,7 @@ def test_twist_incidence_sweep_and_dihedral_put_the_sections_where_they_belong()
     af = naca4("0012")
     wing = Wing.trapezoid(10.0, 2.0, 1.0, sweep_deg=20.0, sweep_at=0.0, dihedral_deg=5.0, twist_tip_deg=-4.0,
                           incidence_deg=3.0)
-    V, F = wing_mesh(wing, [af, af], n_chord=60, n_span=10)
+    V, F = wing_mesh(wing, [af, af], quality="medium")
     assert is_watertight(F) and signed_volume(V, F) > 0.0
 
     def section(y, verts):
@@ -90,7 +91,7 @@ def test_twist_incidence_sweep_and_dihedral_put_the_sections_where_they_belong()
     le_r, te_r = section(0.0, V)
     assert le_r[2] - te_r[2] == pytest.approx(2.0 * math.sin(math.radians(3.0)), abs=3e-3)
     # without the incidence the root chord lies along x
-    V0, _ = wing_mesh(wing, [af, af], n_chord=60, n_span=10, include_incidence=False)
+    V0, _ = wing_mesh(wing, [af, af], quality="medium", include_incidence=False)
     le0, te0 = section(0.0, V0)
     assert abs(le0[2] - te0[2]) < 1e-9
     # left and right are mirror images
@@ -118,7 +119,7 @@ def test_files_are_written_in_the_chosen_unit_and_scale_and_read_back(backend, t
     wing = st.build_wing()
     afs = _airfoils(backend, st.airfoils.keys)
     path = tmp_path / "wing.stl"
-    info = export_wing_stl(path, wing, afs, unit="mm", scale=0.05, n_chord=40, n_span=12, ascii=ascii_format)
+    info = export_wing_stl(path, wing, afs, unit="mm", scale=0.05, quality="coarse", ascii=ascii_format)
     assert info.watertight and info.n_triangles > 0 and info.volume_m3 > 0
     tri = read_stl(path)
     assert tri.shape == (info.n_triangles, 3, 3)
@@ -130,7 +131,7 @@ def test_files_are_written_in_the_chosen_unit_and_scale_and_read_back(backend, t
     else:
         assert path.read_text().startswith("solid ")
     path_m = tmp_path / "wing_m.stl"
-    export_wing_stl(path_m, wing, afs, unit="m", n_chord=40, n_span=12, ascii=ascii_format)
+    export_wing_stl(path_m, wing, afs, unit="m", quality="coarse", ascii=ascii_format)
     assert np.allclose(read_stl(path_m) * 1000.0 * 0.05, tri, rtol=1e-5, atol=1e-6)
 
 
@@ -142,6 +143,6 @@ def test_bad_options_are_refused(backend, tmp_path):
     with pytest.raises(StlError, match="scale"):
         export_wing_stl(tmp_path / "a.stl", wing, afs, scale=0.0)
     with pytest.raises(StlError, match="resolution"):
-        wing_mesh(wing, afs, n_chord=4)
+        wing_mesh(wing, afs, quality=MeshQuality("too coarse", 4, 1.0, 0.1))
     with pytest.raises(StlError, match="one airfoil"):
         wing_mesh(wing, afs[:1])

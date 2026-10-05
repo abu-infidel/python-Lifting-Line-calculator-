@@ -21,8 +21,12 @@ You need Python 3.10 or newer. One command installs everything, including the ma
 
 ```bash
 pip install -r requirements.txt
-python main.py
+python main.py              # the calculator
+python stl_exporter.py      # the separate 3-D model (STL) exporter, also opened from the calculator
 ```
+
+The window fits 16:9 screens from 1280 x 720 up (including laptops at 125-150 % display scaling): it sizes itself to the
+screen, every tab stays visible, and every panel scrolls rather than cutting anything off.
 
 * **Lighter install** - delete the two `neuralfoil` / `aerosandbox` lines of `requirements.txt` (or install only
   `numpy scipy matplotlib PySide6`). The program then uses the built-in section engine and says so; nothing else changes.
@@ -92,7 +96,9 @@ transition are on the Solver tab.
   clipboard as tab-separated text.
 * **Validity notes** state when the case leaves the range of the theory (low aspect ratio, sweep, Mach, ground proximity, near
   stall, low NeuralFoil confidence ...).
-* **Planform** (cl painted on the wing, lift loading against the elliptic ideal, front view), **Spanwise loads** (six
+* **Planform** (cl painted on the wing, lift loading against the elliptic ideal, a **front view** built from the real
+  sections - thickness, twist + incidence, dihedral - and a to-scale **side view** of the root and tip sections that shows the
+  sweep, the twist and the tip airfoil), **Spanwise loads** (six
   distributions), **Airfoils**, **Polars and stall**, **Compare**.
 
 | Spanwise loads | Polars and stall |
@@ -112,9 +118,10 @@ The sweep on the right marks the first stall and shows unconverged post-stall po
 * **High lift tab** - two toggles: **Deploy trailing-edge flaps** and **Deploy leading-edge slats**, for the takeoff or the
   landing setting (see [High-lift devices](#high-lift-devices-flaps-and-slats)). *Analyse stall* finds the maximum lift of the
   clean wing and of the wing with the devices out, the stall speeds for a weight and the comparison with the handbook.
-* **3-D model** (File -> *Export wing as 3-D model (STL)*) - the wing with its real airfoils, twist, sweep and dihedral as a
-  watertight STL surface for CAD, 3-D printing or rendering (see [STL export](#stl-export)).
-* **Controls tab** - plain flaps and ailerons (span range, chord fraction, deflection) as thin-airfoil effects times an
+* **3-D model (STL)** - toolbar button (also File and Tools menus): opens the wing you described in the separate
+  [3-D model exporter](#3-d-model-exporter-stl), which writes a fine, watertight STL surface for CAD, 3-D printing or rendering.
+* **Controls tab** - *Add flap*, *Add aileron* and *Add slats...* (the last opens the High lift tab with the slats deployed);
+  plain flaps and ailerons (span range, chord fraction, deflection) as thin-airfoil effects times an
   effectiveness factor: roll power, adverse yaw, flap lift and pitching moment.
 * **Pin result for comparison** (Ctrl+P) - overlay up to six results, with a table of their totals.
 * **File menu** - projects are plain JSON (`*.json`); export results as CSV or a multi-page **PDF report**. The `examples/`
@@ -149,13 +156,36 @@ When deployed, the devices change only the wing sections they cover, with publis
   whose polars saturate at cl_max, the knee where the lift-curve slope has fallen to 20 % - the first section to stall, the stall
   speed for the weight you enter and conventional reference speeds (takeoff 1.1 and 1.2 Vs, landing 1.15 and 1.3 Vs).
 
-### STL export
+### 3-D model exporter (STL)
 
-File -> *Export wing as 3-D model (STL)* writes the described wing as a closed triangle surface built from the real airfoil
-coordinates: twist (and, optionally, the root incidence) about the quarter chord, sweep, dihedral, airfoils blended between sections,
-both halves (or the right half closed at the root, for a half-span model), tips closed with caps, an elliptic tip ending in a
-point, a sharp (closed) trailing edge. Coordinates: x aft, y to the right wing, z up, in millimetres by default (or cm, m, in, ft)
-times a model scale (0.05 for a 1:20 model). Binary STL by default, ASCII on request.
+A separate small app (its own process: meshing never slows the calculator down). Open it with the calculator's
+**3-D model (STL)** toolbar button - the wing currently described in the inputs opens in it - or on its own:
+
+```bash
+python stl_exporter.py                                  # window; open a project saved by the calculator
+python stl_exporter.py my_wing.json                     # window with that project
+python stl_exporter.py my_wing.json -o wing.stl         # no window: write the STL and exit
+python stl_exporter.py my_wing.json -o wing.stl --quality very_fine --unit mm --scale 0.05 --half
+```
+
+The model is built from the real airfoil coordinates: twist (and, optionally, the root incidence) about the quarter chord,
+sweep, dihedral, airfoils blended between sections, both halves or the right half closed at the root (half-span model), tips
+closed with caps, an elliptic tip ending in a point, a sharp (closed) trailing edge. Coordinates: x aft, y to the right wing,
+z up, in millimetres by default (or cm, m, in, ft) times a model scale (0.05 = 1:20). Binary STL by default, ASCII on request.
+The window shows the wing's data, a rotatable 3-D preview and the expected size before writing.
+
+![The 3-D model exporter with the light-aircraft wing](docs/img/exporter.png)
+
+| Mesh quality | points per airfoil surface | spanwise step at most | triangles (light-aircraft wing) |
+|---|---|---|---|
+| Coarse | 40 | 1 local chord, 5 % of the semi-span | ~6 600 (0.3 MB) |
+| Medium | 80 | 1/2 local chord, 2 % of the semi-span | ~32 000 (1.6 MB) |
+| **Fine** (default) | 160 | 1/4 local chord, 1 % of the semi-span | ~129 000 (6.4 MB) |
+| Very fine | 300 | 1/10 local chord, 0.5 % of the semi-span | ~481 000 (24 MB) |
+
+Chordwise points are clustered at the leading and trailing edges; every wing section is a station, and narrow tips get
+proportionally finer steps. Meshing takes well under a second even at *very fine*. The calculator's front and side views use
+the same section geometry as the exporter, so the views show exactly the model you export.
 
 ## Conventions
 
@@ -227,7 +257,8 @@ tests; the self-test repeats the key ones):
 | Full-span flap, linear sections | exactly the clean wing at 15 deg more angle of attack |
 | Wing CL_max gain from flaps and slats vs the handbook estimate (Raymer) | ratio 0.99-1.11 for devices starting at the root (all flap and slat types, takeoff and landing, both section engines); with NeuralFoil about 20 % below it when an unflapped root strip stalls early in the flap-edge upwash |
 | Built-in engine CL_max (lift-curve knee) vs NeuralFoil lift peak | within -4 % .. +6 % |
-| STL model | watertight, outward normals, volume = airfoil area x chord^2 integrated over the span within 0.1 % |
+| 3-D model exporter | 16 different wings (all examples, forward sweep with anhedral, 55 deg sweep, strong washout, a 0.8 m model, 4- and 5-digit and 6A codes, a 4-section kinked wing, elliptic, inverse taper) at every quality: watertight, outward normals, no degenerate facets, size exact, volume = airfoil area x chord^2 integrated over the span within 0.3 %, spanwise steps within the quality limits |
+| Front view vs 3-D model | identical section heights at every station (0.2 mm) |
 
 **Reading the accuracy of a result.** Lifting-line theory is a model, not an oracle: the numbers above are the *agreement with
 better or exact methods*, which is what bounds the error from the theory. On top of that comes the quality of the section data

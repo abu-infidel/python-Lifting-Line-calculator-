@@ -1,4 +1,4 @@
-"""Export the wing as a 3-D surface model in STL format (GUI-free).
+"""Wing surface meshes and STL files (GUI-free; used by the separate 3-D model exporter app).
 
 The surface is built from the real airfoil coordinates of every wing section: at each spanwise station the
 section's airfoil (blended linearly between neighbouring sections, as in the analysis) is scaled to the local chord,
@@ -7,12 +7,16 @@ the quarter-chord line with its sweep and dihedral. Consecutive stations are joi
 root of a half model) are closed with caps, so the mesh is **watertight** with **outward normals** - ready for CAD,
 3-D printing, rendering or CFD meshing.
 
+Resolution: chordwise points are cosine-clustered at the leading and trailing edges; spanwise stations include every
+wing section and are spaced no wider than a fraction of the *local* chord and of the semi-span, so narrow tips and
+kinks are as finely resolved as the root. :data:`QUALITY` holds the presets (``fine`` is the default).
+
 Frame: x aft (root leading edge at 0), y towards the right wing, z up - a right-handed frame, so the model is not
 mirrored. STL files carry no units; the coordinates are written in the unit chosen (millimetres by default, the
 convention of most CAD and slicer programs), times an optional model scale.
 
-The trailing edge is closed (a thin trailing-edge gap is blended away over the rear of the airfoil), so every
-section is a single closed loop. A tip with zero chord (an elliptic planform) ends in a point.
+The trailing edge is closed (a thin trailing-edge gap is blended away over the rear of the airfoil), so every section
+is a single closed loop. A tip with zero chord (an elliptic planform) ends in a point.
 """
 
 from __future__ import annotations
@@ -26,11 +30,32 @@ from typing import Sequence
 import numpy as np
 
 from ..airfoil.geometry import Airfoil, cosine_spacing
+from ..core.sections3d import SectionShapeError, blended_shape, closed_section, place
 from ..core.wing import KIND_ELLIPTIC, Wing
 
 #: length units of the exported coordinates, metres per unit
 UNITS = {"mm": 1e-3, "cm": 1e-2, "m": 1.0, "in": 0.0254, "ft": 0.3048}
 DEFAULT_UNIT = "mm"
+
+
+@dataclass(frozen=True)
+class MeshQuality:
+    """Mesh resolution: chordwise intervals per surface, largest spanwise step (fractions of chord and semi-span)."""
+
+    label: str
+    n_chord: int
+    step_chord: float  # spanwise step <= this fraction of the local chord ...
+    step_semispan: float  # ... and <= this fraction of the semi-span
+
+
+QUALITY: dict[str, MeshQuality] = {
+    "coarse": MeshQuality("Coarse (quick look)", 40, 1.0, 0.05),
+    "medium": MeshQuality("Medium", 80, 0.5, 0.02),
+    "fine": MeshQuality("Fine (recommended)", 160, 0.25, 0.01),
+    "very_fine": MeshQuality("Very fine (CFD / large prints)", 300, 0.1, 0.005),
+}
+DEFAULT_QUALITY = "fine"
+MAX_STATIONS_PER_HALF = 2000
 
 
 class StlError(ValueError):
@@ -47,36 +72,37 @@ class MeshInfo:
     area_m2: float
     bounds_m: tuple[tuple[float, float, float], tuple[float, float, float]]
     watertight: bool
+    file_bytes: int = 0
 
 
 # =============================================================================== mesh building
-def _stations(wing: Wing, n_span: int) -> np.ndarray:
-    """Right-half stations from root to tip: every section plus subdivisions (denser towards an elliptic tip)."""
+def spanwise_stations(wing: Wing, step_chord: float, step_semispan: float) -> np.ndarray:
+    """Right-half stations from root to tip: every wing section, with steps no wider than ``step_chord`` x local
+    chord and ``step_semispan`` x semi-span."""
     hs = wing.half_span
-    if wing.kind == KIND_ELLIPTIC:
-        k = np.arange(n_span + 1)
-        return hs * np.sin(0.5 * math.pi * k / n_span)
+    if wing.kind == KIND_ELLIPTIC:  # y = hs sin(phi): dy = hs cos(phi) dphi follows the chord c0 cos(phi)
+        dphi = min(step_chord * wing.root_chord / hs, step_semispan)
+        n = min(max(int(math.ceil(0.5 * math.pi / dphi)), 8), MAX_STATIONS_PER_HALF)
+        return hs * np.sin(0.5 * math.pi * np.arange(n + 1) / n)
     ys = np.array([s.y for s in wing.sections], dtype=float)
+    floor = 0.02 * wing.root_chord  # a (nearly) pointed tip still gets a finite step
     out = [ys[0]]
     for y0, y1 in zip(ys[:-1], ys[1:]):
-        m = max(2, int(math.ceil(n_span * (y1 - y0) / hs)))
+        c_min = max(min(float(wing.chord(y0)), float(wing.chord(y1))), floor)
+        step = min(step_chord * c_min, step_semispan * hs)
+        m = max(2, int(math.ceil((y1 - y0) / step)))
         out += list(np.linspace(y0, y1, m + 1)[1:])
+    if len(out) - 1 > MAX_STATIONS_PER_HALF:
+        raise StlError("the requested resolution needs too many spanwise stations; choose a coarser quality")
     return np.array(out)
 
 
 def _section_shape(af: Airfoil, frac: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """(x, z_upper, z_lower) of an airfoil at chord fractions ``frac`` (0 nose, 1 trailing edge), closed TE."""
-    x0 = float(af.coords[:, 0].min())
-    x = x0 + (1.0 - x0) * frac
-    zu, zl = np.asarray(af.y_upper(x), dtype=float), np.asarray(af.y_lower(x), dtype=float)
-    nose = 0.5 * (zu[0] + zl[0])
-    zu[0] = zl[0] = nose
-    mid = 0.5 * (zu[-1] + zl[-1])
-    ramp = frac**2  # blend a trailing-edge gap away over the rear of the section
-    zu = zu - (zu[-1] - mid) * ramp
-    zl = zl - (zl[-1] - mid) * ramp
-    zu[-1] = zl[-1] = mid
-    return x, zu, zl
+    """(x, z_upper, z_lower) of an airfoil at chord fractions ``frac``, closed trailing edge (shared with the views)."""
+    try:
+        return closed_section(af, frac)
+    except SectionShapeError as exc:
+        raise StlError(str(exc)) from exc
 
 
 def _ring2d(x: np.ndarray, zu: np.ndarray, zl: np.ndarray) -> np.ndarray:
@@ -92,109 +118,99 @@ def wing_mesh(
     wing: Wing,
     airfoils: Sequence[Airfoil],
     *,
-    n_chord: int = 80,
-    n_span: int = 40,
+    quality: str | MeshQuality = DEFAULT_QUALITY,
     half: bool = False,
     include_incidence: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Vertices (V, 3) in metres and triangles (F, 3) of the wing surface.
 
-    ``airfoils`` has one entry per wing section. ``n_chord`` is the number of chordwise intervals per surface,
-    ``n_span`` the approximate number of spanwise intervals per half-wing. ``half`` builds the right half only, closed
-    at the root (a half-span model)."""
+    ``airfoils`` has one entry per wing section. ``quality`` is a key of :data:`QUALITY` or a :class:`MeshQuality`.
+    ``half`` builds the right half only, closed at the root (a half-span model)."""
+    q = QUALITY[quality] if isinstance(quality, str) else quality
+    if isinstance(quality, str) and quality not in QUALITY:
+        raise StlError(f"unknown mesh quality {quality!r}")
     if len(airfoils) != len(wing.sections):
         raise StlError("need one airfoil per wing section")
-    if not 8 <= n_chord <= 400 or not 4 <= n_span <= 400:
-        raise StlError("the mesh resolution must be 8-400 chordwise and 4-400 spanwise intervals")
-    frac = cosine_spacing(n_chord)  # n_chord + 1 points from the nose (0) to the trailing edge (1)
+    if not 8 <= q.n_chord <= 600 or not (q.step_chord > 0 and q.step_semispan > 0):
+        raise StlError("the mesh resolution must be 8-600 chordwise intervals with positive spanwise steps")
+    n = q.n_chord
+    frac = cosine_spacing(n)  # n + 1 points from the nose (0) to the trailing edge (1)
     shapes = [_section_shape(af, frac) for af in airfoils]
 
-    ys_right = _stations(wing, n_span)
+    ys_right = spanwise_stations(wing, q.step_chord, q.step_semispan)
     ys = ys_right if half else np.concatenate([-ys_right[:0:-1], ys_right])
-    i0, i1, xi = wing.airfoil_blend(ys)
     chord, x_c4, z_c4 = wing.chord(ys), wing.x_c4(ys), wing.z_c4(ys)
-    theta = np.radians(wing.twist_deg(ys) + (wing.incidence_deg if include_incidence else 0.0))
 
-    root_chord = wing.root_chord
-    rings: list[np.ndarray | None] = []  # 3-D loops, or None for a station that is a single point (zero chord)
-    points: list[np.ndarray] = []
-    for j, y in enumerate(ys):
-        c = float(chord[j])
-        if c <= 1e-9 * root_chord:
-            rings.append(None)
-            points.append(np.array([x_c4[j], y, z_c4[j]]))
-            continue
-        a, b, w = int(i0[j]), int(i1[j]), float(xi[j])
-        xa = (1.0 - w) * shapes[a][0] + w * shapes[b][0]
-        zu = (1.0 - w) * shapes[a][1] + w * shapes[b][1]
-        zl = (1.0 - w) * shapes[a][2] + w * shapes[b][2]
-        loop = _ring2d(xa, zu, zl)
-        dx, dz = (loop[:, 0] - 0.25) * c, loop[:, 1] * c
-        ct, st = math.cos(theta[j]), math.sin(theta[j])  # nose-up rotation about the quarter chord
-        X = x_c4[j] + dx * ct + dz * st
-        Z = z_c4[j] - dx * st + dz * ct
-        rings.append(np.column_stack([X, np.full_like(X, y), Z]))
-        points.append(np.empty(0))
-
-    m = 2 * n_chord  # points per ring
-    verts: list[np.ndarray] = []
-    index: list[np.ndarray | int] = []
+    m = 2 * n  # points per ring
+    point = chord <= 1e-9 * wing.root_chord  # zero-chord stations (elliptic tips) are single points
+    if np.any(point[1:] & point[:-1]):
+        raise StlError("two consecutive stations have zero chord")
+    verts, start = [], np.zeros(len(ys), dtype=np.int64)
     count = 0
-    for ring, pt in zip(rings, points):
-        if ring is None:
-            verts.append(pt[None, :])
-            index.append(count)
+    for j, y in enumerate(ys):
+        start[j] = count
+        if point[j]:
+            verts.append(np.array([[x_c4[j], y, z_c4[j]]]))
             count += 1
-        else:
-            verts.append(ring)
-            index.append(np.arange(count, count + m))
-            count += m
+            continue
+        loop = _ring2d(*blended_shape(wing, shapes, float(y)))
+        X, Z = place(wing, float(y), loop[:, 0], loop[:, 1], include_incidence)  # the same placement as the views
+        verts.append(np.column_stack([X, np.full(m, y), Z]))
+        count += m
     V = np.vstack(verts)
 
-    side: list[tuple[int, int, int]] = []
-    for j in range(len(rings) - 1):
-        r0, r1 = index[j], index[j + 1]
-        if isinstance(r0, int) and isinstance(r1, int):
-            raise StlError("two consecutive stations have zero chord")
-        for k in range(m):
-            k1 = (k + 1) % m
-            if isinstance(r1, int):  # the next station is a point (zero-chord tip)
-                side.append((r0[k], r0[k1], r1))
-            elif isinstance(r0, int):
-                side.append((r0, r1[k1], r1[k]))
-            else:
-                side.append((r0[k], r0[k1], r1[k1]))
-                side.append((r0[k], r1[k1], r1[k]))
-    F_side = np.array(side, dtype=np.int64)
+    k = np.arange(m)
+    k1 = (k + 1) % m
+    side = []
+    for j in range(len(ys) - 1):
+        r0, r1 = start[j] + k, start[j + 1] + k
+        if point[j + 1]:
+            side.append(np.column_stack([r0, start[j] + k1, np.full(m, start[j + 1])]))
+        elif point[j]:
+            side.append(np.column_stack([np.full(m, start[j]), start[j + 1] + k1, r1]))
+        else:
+            r0k1, r1k1 = start[j] + k1, start[j + 1] + k1
+            side.append(np.column_stack([r0, r0k1, r1k1]))
+            side.append(np.column_stack([r0, r1k1, r1]))
+    F_side = np.vstack(side)
 
-    def cap(ring_idx: np.ndarray, outward_y: float) -> np.ndarray:
-        n = n_chord
-        up = [int(ring_idx[n - i]) for i in range(n + 1)]  # up[i]: upper surface at chord index i (up[0] nose, up[n] TE)
-        lo = [int(ring_idx[n + i]) if i < n else int(ring_idx[0]) for i in range(n + 1)]
-        tris = [(up[0], up[1], lo[1])]
-        for i in range(1, n - 1):
-            tris += [(up[i], up[i + 1], lo[i + 1]), (up[i], lo[i + 1], lo[i])]
-        tris.append((up[n - 1], up[n], lo[n - 1]))
-        tris = np.array(tris, dtype=np.int64)
+    def cap(s0: int, outward_y: float) -> np.ndarray:
+        up = np.array([s0 + n - i for i in range(n + 1)])  # up[i]: upper surface at chord index i (0 nose, n TE)
+        lo = np.array([s0 + n + i if i < n else s0 for i in range(n + 1)])
+        i = np.arange(1, n - 1)
+        tris = np.vstack([
+            [[up[0], up[1], lo[1]]],
+            np.column_stack([up[i], up[i + 1], lo[i + 1]]),
+            np.column_stack([up[i], lo[i + 1], lo[i]]),
+            [[up[n - 1], up[n], lo[n - 1]]],
+        ]).astype(np.int64)
         nrm = np.cross(V[tris[:, 1]] - V[tris[:, 0]], V[tris[:, 2]] - V[tris[:, 0]])
-        if float(np.sum(nrm[:, 1])) * outward_y < 0.0:
-            tris = tris[:, ::-1]
-        return tris
+        return tris[:, ::-1] if float(np.sum(nrm[:, 1])) * outward_y < 0.0 else tris
 
     caps = []
-    if not isinstance(index[0], int):
-        caps.append(cap(index[0], -1.0))
-    if not isinstance(index[-1], int):
-        caps.append(cap(index[-1], 1.0))
-    # Orient the side surface outwards: on the upper surface, around mid-chord, the outward normal points up.
-    k_mid = n_chord // 2  # ring index of the upper surface at mid-chord
-    mid_ids = np.array([int(r[k_mid]) for r in index if not isinstance(r, int)])
+    if not point[0]:
+        caps.append(cap(int(start[0]), -1.0))
+    if not point[-1]:
+        caps.append(cap(int(start[-1]), 1.0))
+    # Orient the side surface outwards: on the upper surface around mid-chord the outward normal points up.
+    mid_ids = np.array([start[j] + n // 2 for j in range(len(ys)) if not point[j]])
     tri = F_side[np.isin(F_side[:, 0], mid_ids)]
     nz = np.cross(V[tri[:, 1]] - V[tri[:, 0]], V[tri[:, 2]] - V[tri[:, 0]])[:, 2]
     if float(np.sum(nz)) < 0.0:
         F_side = F_side[:, ::-1]
-    F = np.vstack([F_side] + caps) if caps else F_side
-    return V, F
+    return V, np.vstack([F_side] + caps)
+
+
+def estimate_triangles(wing: Wing, quality: str = DEFAULT_QUALITY, half: bool = False) -> int:
+    """Number of triangles :func:`wing_mesh` will produce (for a size preview, without building the mesh)."""
+    q = QUALITY[quality]
+    ys = spanwise_stations(wing, q.step_chord, q.step_semispan)
+    point = wing.chord(ys) <= 1e-9 * wing.root_chord
+    m = 2 * q.n_chord
+    per_half = sum(m if (point[j] or point[j + 1]) else 2 * m for j in range(len(ys) - 1))
+    cap = 2 * q.n_chord - 2
+    caps = (0 if point[-1] else cap) * (1 if half else 2) + (cap if half and not point[0] else 0)
+    return per_half * (1 if half else 2) + caps
 
 
 # =============================================================================== mesh checks
@@ -211,19 +227,30 @@ def surface_area(V: np.ndarray, F: np.ndarray) -> float:
 
 def is_watertight(F: np.ndarray) -> bool:
     """Every edge is shared by exactly two triangles that traverse it in opposite directions (closed, oriented)."""
+    F = np.asarray(F, dtype=np.int64)
     e = np.vstack([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
     if np.any(e[:, 0] == e[:, 1]):
         return False
-    directed = {tuple(x) for x in e.tolist()}
-    if len(directed) != len(e):  # an edge traversed twice in the same direction: inconsistent orientation
+    base = int(F.max()) + 1
+    fwd = e[:, 0] * base + e[:, 1]
+    if np.unique(fwd).size != fwd.size:  # an edge traversed twice in the same direction
         return False
-    return all((b, a) in directed for a, b in directed)
+    rev = e[:, 1] * base + e[:, 0]
+    return bool(np.all(np.isin(rev, fwd)))
+
+
+def triangle_areas(V: np.ndarray, F: np.ndarray) -> np.ndarray:
+    a, b, c = V[F[:, 0]], V[F[:, 1]], V[F[:, 2]]
+    return 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
 
 
 # =============================================================================== file output
+_RECORD = np.dtype([("n", "<f4", (3,)), ("v", "<f4", (3, 3)), ("attr", "<u2")])
+
+
 def write_stl(path: str | Path, V: np.ndarray, F: np.ndarray, *, factor: float = 1.0, name: str = "wing",
-              ascii: bool = False) -> None:
-    """Write triangles ``F`` of vertices ``V`` (scaled by ``factor``) as a binary (default) or ASCII STL file."""
+              ascii: bool = False) -> int:
+    """Write triangles ``F`` of vertices ``V`` (scaled by ``factor``) as binary (default) or ASCII STL; returns bytes."""
     P = np.asarray(V, dtype=float) * factor
     tri = P[F]
     nrm = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
@@ -232,24 +259,22 @@ def write_stl(path: str | Path, V: np.ndarray, F: np.ndarray, *, factor: float =
     path = Path(path)
     if ascii:
         safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name) or "wing"
-        lines = [f"solid {safe}"]
-        for n, t in zip(nrm, tri):
-            lines.append(f"  facet normal {n[0]:.6e} {n[1]:.6e} {n[2]:.6e}")
-            lines.append("    outer loop")
-            for v in t:
-                lines.append(f"      vertex {v[0]:.6e} {v[1]:.6e} {v[2]:.6e}")
-            lines.append("    endloop")
-            lines.append("  endfacet")
-        lines.append(f"endsolid {safe}")
-        path.write_text("\n".join(lines) + "\n", encoding="ascii")
-        return
-    rec = np.zeros(len(F), dtype=[("n", "<f4", (3,)), ("v", "<f4", (3, 3)), ("attr", "<u2")])
+        rows = np.concatenate([nrm[:, None, :], tri], axis=1).reshape(-1, 12)
+        body = "".join(
+            "  facet normal {:.6e} {:.6e} {:.6e}\n    outer loop\n"
+            "      vertex {:.7e} {:.7e} {:.7e}\n      vertex {:.7e} {:.7e} {:.7e}\n      vertex {:.7e} {:.7e} {:.7e}\n"
+            "    endloop\n  endfacet\n".format(*r) for r in rows.tolist()
+        )
+        path.write_text(f"solid {safe}\n{body}endsolid {safe}\n", encoding="ascii")
+        return path.stat().st_size
+    rec = np.zeros(len(F), dtype=_RECORD)
     rec["n"], rec["v"] = nrm, tri
     header = f"Lifting-line wing calculator - {name}".encode("ascii", "replace")[:80].ljust(80, b" ")
     with path.open("wb") as fh:
         fh.write(header)
         fh.write(struct.pack("<I", len(F)))
         fh.write(rec.tobytes())
+    return path.stat().st_size
 
 
 def read_stl(path: str | Path) -> np.ndarray:
@@ -258,9 +283,8 @@ def read_stl(path: str | Path) -> np.ndarray:
     if len(data) >= 84:
         n = struct.unpack("<I", data[80:84])[0]
         if len(data) == 84 + 50 * n:
-            rec = np.frombuffer(data[84:], dtype=[("n", "<f4", (3,)), ("v", "<f4", (3, 3)), ("attr", "<u2")], count=n)
-            return rec["v"].astype(float)
-    verts = [list(map(float, line.split()[1:4])) for line in data.decode("ascii").splitlines() if line.strip().startswith("vertex")]
+            return np.frombuffer(data[84:], dtype=_RECORD, count=n)["v"].astype(float)
+    verts = [line.split()[1:4] for line in data.decode("ascii").splitlines() if line.strip().startswith("vertex")]
     return np.array(verts, dtype=float).reshape(-1, 3, 3)
 
 
@@ -269,10 +293,9 @@ def export_wing_stl(
     wing: Wing,
     airfoils: Sequence[Airfoil],
     *,
+    quality: str | MeshQuality = DEFAULT_QUALITY,
     unit: str = DEFAULT_UNIT,
     scale: float = 1.0,
-    n_chord: int = 80,
-    n_span: int = 40,
     half: bool = False,
     include_incidence: bool = True,
     ascii: bool = False,
@@ -282,14 +305,16 @@ def export_wing_stl(
         raise StlError(f"unknown unit {unit!r}; choose one of {', '.join(UNITS)}")
     if not (scale > 0.0) or not math.isfinite(scale):
         raise StlError("the model scale must be a positive number")
-    V, F = wing_mesh(wing, airfoils, n_chord=n_chord, n_span=n_span, half=half, include_incidence=include_incidence)
-    write_stl(path, V, F, factor=scale / UNITS[unit], name=wing.name, ascii=ascii)
+    V, F = wing_mesh(wing, airfoils, quality=quality, half=half, include_incidence=include_incidence)
+    size = write_stl(path, V, F, factor=scale / UNITS[unit], name=wing.name, ascii=ascii)
     lo, hi = V.min(axis=0), V.max(axis=0)
     return MeshInfo(
         n_vertices=len(V), n_triangles=len(F), volume_m3=signed_volume(V, F), area_m2=surface_area(V, F),
         bounds_m=(tuple(float(v) for v in lo), tuple(float(v) for v in hi)), watertight=is_watertight(F),
+        file_bytes=size,
     )
 
 
-__all__ = ["UNITS", "DEFAULT_UNIT", "MeshInfo", "StlError", "export_wing_stl", "wing_mesh", "write_stl", "read_stl",
-           "signed_volume", "surface_area", "is_watertight"]
+__all__ = ["UNITS", "DEFAULT_UNIT", "QUALITY", "DEFAULT_QUALITY", "MeshQuality", "MeshInfo", "StlError",
+           "export_wing_stl", "wing_mesh", "write_stl", "read_stl", "spanwise_stations", "estimate_triangles",
+           "signed_volume", "surface_area", "is_watertight", "triangle_areas"]

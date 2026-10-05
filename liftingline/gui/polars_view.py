@@ -56,6 +56,9 @@ class PolarsView(QWidget):
             self.variable.addItem(label, key)
         self.variable.currentIndexChanged.connect(self._variable_changed)
         row.addWidget(self.variable)
+        row.addStretch(1)
+        v.addLayout(row)
+        row = QHBoxLayout()  # the range on its own line keeps the tab narrow enough for small screens
         self.from_label, self.to_label = QLabel("from"), QLabel("to")
         row.addWidget(self.from_label)
         # one pair of range fields per kind of variable; only the matching pair is shown

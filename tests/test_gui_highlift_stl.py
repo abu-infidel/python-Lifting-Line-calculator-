@@ -6,15 +6,14 @@ pytestmark = pytest.mark.gui
 
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from liftingline.gui.main_window import MainWindow  # noqa: E402
 from liftingline.gui.settings import Settings  # noqa: E402
-from liftingline.gui.stl_dialog import StlExportDialog  # noqa: E402
 from liftingline.gui.theme import apply_theme  # noqa: E402
 from liftingline.io.presets import PRESETS  # noqa: E402
 from liftingline.io.project import ProjectState  # noqa: E402
-from liftingline.io.stl import read_stl  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -153,36 +152,79 @@ def test_high_lift_settings_survive_save_and_open(qtbot, window, tmp_path):
     assert window.collect_state().high_lift == saved
 
 
-# ===================================================================================== STL
-def test_the_wing_is_exported_as_a_closed_stl_model(qtbot, window, tmp_path):
-    load_preset(qtbot, window, "Light aircraft (Cessna 172-like)")
-    path = tmp_path / "wing.stl"
-    info = window.export_stl(str(path), dict(unit="mm", scale=1.0, half=False, n_chord=40, n_span=20,
-                                             include_incidence=True, ascii=False))
-    assert info is not None and info.watertight and path.exists()
-    pts = read_stl(path).reshape(-1, 3)
-    span = window.collect_state().build_wing().span
-    assert pts[:, 1].max() - pts[:, 1].min() == pytest.approx(span * 1000.0, rel=1e-6)
-    assert "wing.stl" in window.results.log_box.toPlainText()
+# ============================================================== 3-D model exporter (a separate app)
+def test_the_calculator_hands_the_wing_to_the_separate_exporter_app(qtbot, window, monkeypatch):
+    load_preset(qtbot, window, "Swept wing, 30 degrees")
+    started = []
+    monkeypatch.setattr("liftingline.gui.main_window.QProcess.startDetached",
+                        lambda prog, args, wd: started.append((prog, args, wd)) or (True, 1234))
+    window.act_stl.trigger()  # the toolbar button
+    assert len(started) == 1
+    prog, args, wd = started[0]
+    assert args[:2] == ["-m", "liftingline.stl_app"] and args[2].endswith(".json")
+    sent = ProjectState.load(args[2])
+    assert sent.build_wing() == window.collect_state().build_wing()  # exactly the wing described in the inputs
+    assert "3-D model exporter opened" in window.results.log_box.toPlainText()
 
 
-def test_stl_dialog_options_and_size_preview(qtbot):
-    dlg = StlExportDialog(10.0)
-    qtbot.addWidget(dlg)
-    assert dlg.options()["unit"] == "mm" and dlg.options()["half"] is False
-    assert "10000 mm" in dlg.size.text()
-    dlg.scale.set_si(0.05)
-    dlg.model.setCurrentIndex(1)
-    dlg.unit.setCurrentIndex(dlg.unit.findData("cm"))
-    o = dlg.options()
-    assert o["half"] is True and o["scale"] == 0.05 and o["unit"] == "cm"
-    assert "25 cm" in dlg.size.text()
+def test_the_exporter_is_refused_for_an_invalid_wing(qtbot, window, quiet_dialogs, monkeypatch):
+    called = []
+    monkeypatch.setattr("liftingline.gui.main_window.QProcess.startDetached", lambda *a: called.append(a) or (True, 1))
+    monkeypatch.setattr(window.wing_panel, "problems", lambda: ["the span must be a positive number"])
+    assert window.open_stl_exporter() is None and not called
+    assert any("Fix the wing" in str(args) for _kind, args in quiet_dialogs)
 
 
-def test_stl_export_refuses_a_broken_wing(qtbot, window, quiet_dialogs, tmp_path):
-    st = window.collect_state()
-    st.airfoils.keys = ["no-such-airfoil.dat", "no-such-airfoil.dat"]
-    window.apply_state(st)
-    assert window.export_stl(str(tmp_path / "x.stl"), dict(unit="mm")) is None
-    assert not (tmp_path / "x.stl").exists()
-    assert quiet_dialogs
+def test_the_calculator_does_not_load_the_mesh_code():
+    import subprocess
+    import sys
+
+    code = ("import sys, liftingline.gui.main_window; "
+            "print(int('liftingline.io.stl' in sys.modules or 'liftingline.stl_app' in sys.modules))")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120,
+                         env={**__import__("os").environ, "QT_QPA_PLATFORM": "offscreen"})
+    assert out.returncode == 0 and out.stdout.strip() == "0", out.stderr
+
+
+# ================================================================================ 16:9 screens
+@pytest.mark.parametrize("size", [(1280, 680), (1366, 728), (1600, 860), (1920, 1040)])
+def test_everything_fits_and_every_tab_is_visible_on_16_9_screens(qtbot, window, size):
+    from PySide6.QtWidgets import QScrollArea
+
+    w, h = size
+    assert window.minimumSizeHint().width() <= w and window.minimumSizeHint().height() <= h
+    window.resize(w, h)
+    QApplication.processEvents()
+    assert window.width() <= w and window.height() <= h
+    for tabs in (window.input_tabs, window.plot_tabs):
+        bar = tabs.tabBar()
+        for i in range(bar.count()):
+            r = bar.tabRect(i)
+            assert r.left() >= 0 and r.right() < bar.width() + 1, f"tab {tabs.tabText(i)!r} is cut off at {size}"
+    for i in range(window.input_tabs.count()):
+        sa = window.input_tabs.widget(i)
+        assert isinstance(sa, QScrollArea)
+        assert sa.verticalScrollBarPolicy() != Qt.ScrollBarAlwaysOff
+        assert sa.horizontalScrollBarPolicy() != Qt.ScrollBarAlwaysOff  # never clipped without a way to reach it
+    tb = window.findChild(QtWidgets.QToolBar, "main-toolbar")
+    run_button = tb.widgetForAction(window.act_stl)
+    assert run_button.isVisible() and run_button.geometry().right() <= tb.width()
+
+
+def test_the_window_shrinks_to_a_small_screen(qtbot, tmp_path):
+    w = MainWindow(settings=Settings(str(tmp_path / "s.ini")), autorun=False, restore_layout=False)
+    qtbot.addWidget(w)
+    avail = w.screen().availableGeometry()
+    assert w.width() <= max(avail.width(), w.minimumSizeHint().width())
+    assert w.height() <= max(avail.height(), w.minimumSizeHint().height())
+
+
+def test_add_slats_in_the_controls_tab_opens_the_high_lift_tab_with_slats_out(qtbot, window):
+    load_preset(qtbot, window)
+    buttons = [b for b in window.controls_panel.findChildren(QtWidgets.QPushButton) if b.text().startswith("Add slats")]
+    assert len(buttons) == 1
+    buttons[0].click()
+    assert window.input_tabs.tabText(window.input_tabs.currentIndex()) == "High lift"
+    assert window.highlift_panel.slat_box.isChecked() and window.collect_state().high_lift.slats_on
+    run_now(qtbot, window)
+    assert "slat" in window.last.result.info["high_lift"]

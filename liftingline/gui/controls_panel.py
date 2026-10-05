@@ -47,6 +47,7 @@ _COLUMNS = (
 class ControlsPanel(QWidget):
     changed = Signal()
     deflections_changed = Signal()
+    high_lift_requested = Signal(str)  # "slats" or "flaps": open the High lift tab with that device deployed
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -63,9 +64,9 @@ class ControlsPanel(QWidget):
         self.table.setHorizontalHeaderLabels([h for _, h, _, _ in _COLUMNS])
         for c, (_k, _h, _s, tip) in enumerate(_COLUMNS):
             self.table.horizontalHeaderItem(c).setToolTip(tip)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        # columns as wide as their headers; the table scrolls sideways on a narrow screen instead of cutting them
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setStretchLastSection(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -78,6 +79,8 @@ class ControlsPanel(QWidget):
             ("Add flap", "A plain flap: both wings deflect alike", lambda: self.add_surface(KIND_FLAP)),
             ("Add aileron", "An aileron: the right and left surfaces move oppositely", lambda: self.add_surface(KIND_AILERON)),
             ("Remove", "Remove the selected surface", self.remove_selected),
+            ("Add slats...", "Leading-edge slats (and takeoff/landing high-lift flaps) with published data: opens the High lift "
+             "tab with the slats deployed", lambda: self.high_lift_requested.emit("slats")),
         ):
             b = QPushButton(text)
             b.setToolTip(tip)

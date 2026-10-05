@@ -19,5 +19,8 @@ def run_gui(argv: list[str] | None = None) -> int:
     settings = Settings()
     apply_theme(app, settings.get_str("ui/theme", "system"))
     window = MainWindow(settings=settings)
-    window.show()
+    if window.prefer_maximized:  # small (or highly scaled) screens: use all of it, nothing off-screen
+        window.showMaximized()
+    else:
+        window.show()
     return app.exec()

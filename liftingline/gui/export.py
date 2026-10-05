@@ -122,7 +122,8 @@ def export_pdf(
         for fig in (
             _summary_page(state, result, infos, system),
             _plot_page("Planform and lift loading",
-                       lambda f: plot_planform(f, result, wing, system, theme, getattr(result.request.section, "high_lift", None))),
+                       lambda f: plot_planform(f, result, wing, system, theme, getattr(result.request.section, "high_lift", None),
+                                               [i.airfoil for i in infos] if len(infos) == len(wing.sections) else None)),
             _plot_page("Spanwise distributions", lambda f: plot_spanwise(f, result, system, theme)),
             _plot_page(
                 "Section airfoils",

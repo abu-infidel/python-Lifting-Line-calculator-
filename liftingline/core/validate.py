@@ -287,7 +287,7 @@ def _high_lift_and_stl(c: _Collector) -> None:
             rep.estimate.dCL_max, rep.dCL_max, rel=0.25)
 
     af = be.resolve("NACA 0012").airfoil
-    V, F = wing_mesh(Wing.rectangular(8.0, 1.0), [af, af], n_chord=60, n_span=8)
+    V, F = wing_mesh(Wing.rectangular(8.0, 1.0), [af, af], quality="medium")
     x = np.linspace(0.0, 1.0, 4001)
     area = float(np.sum(0.5 * (af.thickness(x)[1:] + af.thickness(x)[:-1]) * np.diff(x)))
     c.true("STL model of a wing is closed and consistently oriented (watertight)", is_watertight(F))
