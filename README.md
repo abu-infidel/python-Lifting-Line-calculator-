@@ -265,6 +265,28 @@ better or exact methods*, which is what bounds the error from the theory. On top
 (NeuralFoil is a surrogate of XFOIL; XFOIL is within a few per cent of wind-tunnel lift and some 10 % on drag for clean
 airfoils at moderate Reynolds numbers).
 
+### Comparison with real aircraft
+
+`liftingline/io/reference_aircraft.py` builds wings from published data and checks the program against the Pilot's
+Operating Handbooks (`tests/test_reference_aircraft.py`):
+
+| Aircraft, point | Handbook (whole airplane) | Program (wing, NeuralFoil) |
+|---|---|---|
+| Cessna 172S, stall flaps up, 2550 lb | CL_max 1.54 (53 KCAS) | CL_max 1.60, stall speed 52.0 kt (+4 %) |
+| Cessna 172S, stall flaps 30 deg | CL_max 1.88 (48 KCAS) | CL_max 2.13 (+13 %: handbook flap data assume a full 40 deg flap) |
+| Cessna 152, stall flaps up / 30 deg, 1670 lb | CL_max 1.34 / 1.67 (48 / 43 KCAS) | 1.57 / 2.15 (+17 / +29 %) |
+| Cessna 172S, cruise 124 KTAS at 8500 ft | level flight | wing carries 2550 lb at 1.2 deg fuselage angle of attack |
+| Cessna 172S, 126 KTAS at sea level | level flight | at 0.1 deg |
+
+Section data agree with the wind-tunnel NACA 2412 (zero-lift angle -2.2 vs -2.0 deg, cl_max 1.65 vs 1.62 at Re 3e6) and the
+wing lift-curve slope with the Helmbold formula (4.64 vs 4.66 per rad). The program's wing is clean, smooth and alone, so at
+stall it comes out a few per cent *above* the airplane (tail download, fuselage, surface finish).
+
+**If the lift looks low**: the angle of attack is that of the root chord plus the *root incidence* (real wings are set
+1-2 deg nose-up to the fuselage); a finite wing has only about 3/4 of the 2-D airfoil's lift slope (aspect ratio 7.5:
+4.6 against 6.0 per rad); washout and altitude (density) reduce lift; the airfoil's zero-lift angle (-2 deg for a
+2412) adds to it.
+
 ## Limitations
 
 * **Aspect ratio below about 4**: lift and induced drag are over-predicted. **Mach above about 0.7**: Prandtl-Glauert fails and wave

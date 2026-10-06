@@ -168,7 +168,7 @@ def test_other_sweeps_run_and_the_deflection_sweep_needs_a_control_surface(qtbot
 
 
 def test_a_sweep_can_be_cancelled(qtbot, window):
-    load_preset(qtbot, window, "Light aircraft (Cessna 172-like)")
+    load_preset(qtbot, window, "Cessna 172S (published wing)")
     pv = window.polars
     pv.variable.setCurrentIndex(pv.variable.findData("alpha"))
     pv.points.setValue(120)
@@ -304,7 +304,7 @@ def test_screenshots_of_the_new_tabs(qtbot, window, tmp_path):
 
 
 # ============================================================================== report and self-test
-@pytest.mark.parametrize("name", ["Rectangular wing, AR 8", "Swept wing, 30 degrees", "Light aircraft (Cessna 172-like)"])
+@pytest.mark.parametrize("name", ["Rectangular wing, AR 8", "Swept wing, 30 degrees", "Cessna 172S (published wing)"])
 def test_the_plotted_lift_loading_integrates_to_the_wing_lift(name):
     """For swept wings 'c cl' does not (cl is normal to the quarter-chord line); lift per span must, for every wing."""
     import numpy as np

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "Light aircraft (Cessna 172-like)",
-  "notes": "Straight tapered wing with a little dihedral and washout; cruise-like speed at sea level.",
+  "notes": "Simplified straight-tapered version of the Cessna 172 wing with its real incidence (+1.5 deg at the root, -1.5 deg at the tip); the angle of attack is that of the fuselage. For the exact published wing see 'Cessna 172S (published wing)'.",
   "wing": {
     "mode": "trapezoid",
     "define_by": "span_chords",
@@ -15,7 +15,7 @@
     "sweep_at": 0.25,
     "dihedral_deg": 1.7,
     "twist_tip_deg": -3.0,
-    "incidence_deg": 0.0,
+    "incidence_deg": 1.5,
     "sections": [],
     "name": "Light aircraft (Cessna 172-like)"
   },
@@ -66,5 +66,20 @@
     "xtr_upper": 1.0,
     "xtr_lower": 1.0
   },
-  "controls": []
+  "controls": [],
+  "high_lift": {
+    "phase": "landing",
+    "flaps_on": false,
+    "flap_type": "slotted",
+    "flap_y_in": 0.0,
+    "flap_y_out": 0.6,
+    "flap_chord_fraction": 0.3,
+    "flap_chord_extension": 1.0,
+    "slats_on": false,
+    "slat_type": "slat",
+    "slat_y_in": 0.0,
+    "slat_y_out": 1.0,
+    "slat_chord_extension": 1.1,
+    "weight_N": 0.0
+  }
 }

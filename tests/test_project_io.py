@@ -321,7 +321,7 @@ def test_every_example_wing_runs_and_has_sensible_numbers(name):
     res = run(Backend().build_request(st))
     t = res.totals
     assert 0.05 < t.CL < 1.2 and 0.003 < t.CD < 0.05 and 5 < t.L_over_D < 80
-    assert res.solver_used == ("numerical" if name in ("Light aircraft (Cessna 172-like)", "Swept wing, 30 degrees", "Sailplane wing, AR 22", "Wing in ground effect") else "classical")
+    assert res.solver_used == ("numerical" if name in ("Cessna 172S (published wing)", "Light aircraft (Cessna 172-like)", "Swept wing, 30 degrees", "Sailplane wing, AR 22", "Wing in ground effect") else "classical")
     assert not st.validate()
 
 

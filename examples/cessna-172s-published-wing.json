@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "name": "Cessna 172S (published wing)",
+  "notes": "Cessna 172S wing from published data: NACA 2412, 64 in chord to 100 in from the centreline then tapered, 174 ft2, span 36 ft 1 in, incidence +1.5 deg at the root and -1.5 deg at the tip, dihedral 1 deg 44 min. Flow: the handbook's 75 % power cruise, 124 KTAS at 8500 ft; at 1.2 deg (fuselage reference line) the wing carries the 2550 lb maximum weight.",
+  "wing": {
+    "mode": "sections",
+    "define_by": "span_chords",
+    "span": 11.0,
+    "root_chord": 1.63,
+    "tip_chord": 1.13,
+    "area": 15.18,
+    "aspect_ratio": 7.971014492753623,
+    "taper_ratio": 0.6932515337423313,
+    "sweep_deg": 0.0,
+    "sweep_at": 0.25,
+    "dihedral_deg": 0.0,
+    "twist_tip_deg": 0.0,
+    "incidence_deg": 1.5,
+    "sections": [
+      {
+        "y": 0.0,
+        "chord": 1.6256,
+        "x_le": 0.0,
+        "z": 0.0,
+        "twist_deg": 0.0
+      },
+      {
+        "y": 2.5405842,
+        "chord": 1.6256,
+        "x_le": 0.0,
+        "z": 0.07688215840950738,
+        "twist_deg": 0.0
+      },
+      {
+        "y": 5.499099999999999,
+        "chord": 1.046409258480216,
+        "x_le": 0.14479768537994597,
+        "z": 0.16641159828897698,
+        "twist_deg": -3.0
+      }
+    ],
+    "name": "Cessna 172S (published wing)"
+  },
+  "airfoils": {
+    "keys": [
+      "NACA 2412",
+      "NACA 2412",
+      "NACA 2412"
+    ],
+    "overrides": [
+      {},
+      {},
+      {}
+    ],
+    "polar_files": [
+      "",
+      "",
+      ""
+    ]
+  },
+  "flow": {
+    "atmosphere": "isa",
+    "altitude_m": 2590.8,
+    "delta_T": 0.0,
+    "rho": 1.225,
+    "T": 288.15,
+    "mu": null,
+    "speed_mode": "speed",
+    "V": 63.791111111111114,
+    "mach": 0.16,
+    "alpha_deg": 1.2,
+    "beta_deg": 0.0,
+    "ground_effect": false,
+    "ground_height_m": 2.0,
+    "extra_cd0": 0.0,
+    "compressibility": true,
+    "ref_mode": "mac",
+    "ref_x_frac_mac": 0.25,
+    "ref_x_abs_m": 0.0,
+    "ref_z_abs_m": 0.0
+  },
+  "solver": {
+    "solver": "auto",
+    "n_terms": 80,
+    "n_panels": 80,
+    "nonlinear": "auto",
+    "convergence_check": true,
+    "engine": "auto",
+    "model_size": "xlarge",
+    "n_crit": 9.0,
+    "xtr_upper": 1.0,
+    "xtr_lower": 1.0
+  },
+  "controls": [],
+  "high_lift": {
+    "phase": "landing",
+    "flaps_on": false,
+    "flap_type": "slotted",
+    "flap_y_in": 0.0,
+    "flap_y_out": 0.462,
+    "flap_chord_fraction": 0.3,
+    "flap_chord_extension": 1.0,
+    "slats_on": false,
+    "slat_type": "slat",
+    "slat_y_in": 0.0,
+    "slat_y_out": 1.0,
+    "slat_chord_extension": 1.1,
+    "weight_N": 11342.965118914273
+  }
+}

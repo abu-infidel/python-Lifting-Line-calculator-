@@ -165,7 +165,7 @@ def test_the_exporter_window_opens_a_project_previews_and_exports(qtbot, tmp_pat
     from liftingline.stl_app import window_class
 
     project = tmp_path / "w.json"
-    PRESETS["Light aircraft (Cessna 172-like)"]().save(project)
+    PRESETS["Cessna 172S (published wing)"]().save(project)
     w = window_class()(library_folder="")
     qtbot.addWidget(w)
     w.show()

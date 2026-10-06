@@ -17,6 +17,9 @@ from .project import (
 )
 
 
+CESSNA_172S = "Cessna 172S (published wing)"
+
+
 def _state(name: str, wing: WingSpec, keys: list[str], flow: FlowSpec, notes: str = "") -> ProjectState:
     wing.name = name
     st = ProjectState(wing=wing, airfoils=AirfoilSpec(keys=list(keys)), flow=flow, solver=SolverSpec(), name=name, notes=notes)
@@ -28,11 +31,31 @@ def _state(name: str, wing: WingSpec, keys: list[str], flow: FlowSpec, notes: st
 def light_aircraft() -> ProjectState:
     return _state(
         "Light aircraft (Cessna 172-like)",
-        WingSpec(span=11.0, root_chord=1.63, tip_chord=1.13, dihedral_deg=1.7, twist_tip_deg=-3.0),
+        WingSpec(span=11.0, root_chord=1.63, tip_chord=1.13, dihedral_deg=1.7, twist_tip_deg=-3.0, incidence_deg=1.5),
         ["NACA 2412", "NACA 2412"],
         FlowSpec(V=55.0, alpha_deg=3.0),
-        "Straight tapered wing with a little dihedral and washout; cruise-like speed at sea level.",
+        "Simplified straight-tapered version of the Cessna 172 wing with its real incidence (+1.5 deg at the root, "
+        "-1.5 deg at the tip); the angle of attack is that of the fuselage. For the exact published wing see "
+        "'Cessna 172S (published wing)'.",
     )
+
+
+def cessna_172s() -> ProjectState:
+    """The Cessna 172S wing from published data, at the handbook's cruise point (see :mod:`.reference_aircraft`)."""
+    from .reference_aircraft import FT, KNOT, LBF, cessna_wing
+
+    st = cessna_wing(433.0, 174.0, root_chord_in=64.0, name=CESSNA_172S)
+    st.flow = FlowSpec(altitude_m=8500.0 * FT, V=124.0 * KNOT, alpha_deg=1.2)
+    st.high_lift.weight_N = 2550.0 * LBF
+    st.notes = (
+        "Cessna 172S wing from published data: NACA 2412, 64 in chord to 100 in from the centreline then tapered, "
+        "174 ft2, span 36 ft 1 in, incidence +1.5 deg at the root and -1.5 deg at the tip, dihedral 1 deg 44 min. "
+        "Flow: the handbook's 75 % power cruise, 124 KTAS at 8500 ft; at 1.2 deg (fuselage reference line) the wing "
+        "carries the 2550 lb maximum weight."
+    )
+    st.wing.sync()
+    st.airfoils.fit(st.wing.n_sections())
+    return st
 
 
 def rectangular_wing() -> ProjectState:
@@ -96,6 +119,7 @@ def ground_effect_wing() -> ProjectState:
 
 
 PRESETS: dict[str, Callable[[], ProjectState]] = {
+    CESSNA_172S: cessna_172s,
     "Light aircraft (Cessna 172-like)": light_aircraft,
     "Rectangular wing, AR 8": rectangular_wing,
     "Tapered wing, AR 10": tapered_wing,
@@ -105,4 +129,4 @@ PRESETS: dict[str, Callable[[], ProjectState]] = {
     "Wing in ground effect": ground_effect_wing,
 }
 
-__all__ = ["PRESETS", "light_aircraft"]
+__all__ = ["PRESETS", "CESSNA_172S", "light_aircraft"]
