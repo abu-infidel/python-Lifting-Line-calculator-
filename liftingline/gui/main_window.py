@@ -12,7 +12,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QThreadPool, QTimer, Qt
+from PySide6.QtCore import QProcess, QSignalBlocker, QThreadPool, QTimer, Qt
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QScrollArea,
+    QStackedWidget,
     QStyle,
     QTabWidget,
     QWidget,
@@ -54,6 +55,7 @@ from .library_dialog import LibraryDialog, ReportDialog
 from .plots import make_canvas, plot_airfoils, plot_planform, plot_spanwise
 from .polars_view import PolarsView
 from .results_view import ResultsView
+from .scenario_view import ScenarioView
 from .settings import Settings
 from .solver_panel import SolverPanel
 from .theme import apply_theme, current_theme
@@ -258,12 +260,24 @@ class MainWindow(QMainWindow):
         self.plot_tabs.addTab(self.polars, "Polars and stall")
         self.compare = CompareView(self.system)
         self.plot_tabs.addTab(self.compare, "Compare")
+        self._scenario_cancel = False
+        self._scenario_running = False
         self._sweep_cancel = False
         self._sweeping = False
         self.plot_tabs.tabBar().setUsesScrollButtons(False)  # all plot tabs visible, none behind scroll arrows
         self.plot_tabs.tabBar().setElideMode(Qt.ElideNone)
         self.plot_tabs.currentChanged.connect(lambda _i: self._draw_visible())
-        self.setCentralWidget(self.plot_tabs)
+        # The Scenario workspace (an addition) shares the central area with the plot tabs: the toolbar's Scenario
+        # button switches between the two, so the calculator's own tabs and layout stay exactly as they were.
+        self.scenario = ScenarioView(self.system)
+        self.scenario.run_requested.connect(self._start_scenario)
+        self.scenario.cancel_requested.connect(self._cancel_scenario)
+        self.scenario.edited.connect(self._scenario_edited)
+        self.scenario.back_requested.connect(lambda: self.show_scenario(False))
+        self.central_stack = QStackedWidget()
+        self.central_stack.addWidget(self.plot_tabs)
+        self.central_stack.addWidget(self.scenario)
+        self.setCentralWidget(self.central_stack)
         self._stale_views: set[str] = {"planform", "spanwise", "airfoils"}
 
     def _build_results_dock(self) -> None:
@@ -295,6 +309,12 @@ class MainWindow(QMainWindow):
         self.act_stl.setToolTip("Open the wing in the 3-D model exporter (a separate app) to write an STL file")
         self.act_stl.triggered.connect(lambda: self.open_stl_exporter())
         tb.addAction(self.act_stl)
+        self.act_scenario = QAction("Scenario", self)
+        self.act_scenario.setCheckable(True)
+        self.act_scenario.setToolTip("Scenario: forces along a run from a start to an end airspeed (e.g. a takeoff run), "
+                                     "with an animated playback. Press again to return to the calculator's plots.")
+        self.act_scenario.toggled.connect(self.show_scenario)
+        tb.addAction(self.act_scenario)
         tb.addSeparator()
 
         tb.addWidget(QLabel(" Solver "))
@@ -357,6 +377,7 @@ class MainWindow(QMainWindow):
         self._add_action(m, "&Ideal twist for an elliptic load...", self.open_ideal_twist)
         self._add_action(m, "&Pin result for comparison", self.pin_result, "Ctrl+P")
         self._add_action(m, "3-D &model exporter (STL)...", self.open_stl_exporter)
+        self._add_action(m, "S&cenario: forces along a run...", lambda: self.show_scenario(True))
         self._add_action(m, "&High lift: flaps and slats", lambda: self.show_high_lift("slats"))
         m.addSeparator()
         self._add_action(m, "Airfoil library &folder...", self.choose_library_folder)
@@ -410,6 +431,7 @@ class MainWindow(QMainWindow):
         self.solver_panel.store(st)
         self.controls_panel.store(st)
         self.highlift_panel.store(st)
+        self.scenario.store(st)
         st.solver.solver = self.solver_combo.currentData()
         st.solver.engine = self.engine_combo.currentData()
         st.name, st.notes = self.project_name, self.notes
@@ -426,6 +448,7 @@ class MainWindow(QMainWindow):
             self.solver_panel.load(state)
             self.controls_panel.load(state)
             self.highlift_panel.load(state)
+            self.scenario.load(state)
             self.solver_combo.setCurrentIndex(max(self.solver_combo.findData(state.solver.solver), 0))
             self.engine_combo.setCurrentIndex(max(self.engine_combo.findData(state.solver.engine), 0))
             self.project_name, self.notes = state.name, state.notes
@@ -458,6 +481,7 @@ class MainWindow(QMainWindow):
         self._sync_stations()
         self._refresh_polars_context()
         self.polars.mark_stale()
+        self.scenario.mark_stale()
         self._invalidate_views("planform", "airfoils")
         if self.act_auto.isChecked():
             self._debounce.start()
@@ -486,6 +510,7 @@ class MainWindow(QMainWindow):
         self.results.set_system(self.system)
         self.polars.set_system(self.system)
         self.compare.set_system(self.system)
+        self.scenario.set_system(self.system)
         self._invalidate_views("planform", "spanwise", "airfoils")
 
     def set_theme(self, mode: str) -> None:
@@ -799,6 +824,76 @@ class MainWindow(QMainWindow):
         self.polars.set_running(False)
         self.polars.summary.setText("The sweep failed: " + message)
         self.results.log("sweep failed: " + message)
+
+    # ======================================================================== scenario
+    def show_scenario(self, on: bool = True) -> None:
+        """Switch the central area between the calculator's plots and the Scenario workspace."""
+        self.central_stack.setCurrentWidget(self.scenario if on else self.plot_tabs)
+        if self.act_scenario.isChecked() != on:
+            with QSignalBlocker(self.act_scenario):
+                self.act_scenario.setChecked(on)
+        if not on:
+            self.scenario.pause()
+            self._draw_visible()
+
+    def _scenario_edited(self) -> None:
+        """A scenario input changed: the project is modified, but the main analysis does not need to run again."""
+        if self._loading:
+            return
+        self._dirty = True
+        self._update_title()
+
+    def _start_scenario(self) -> None:
+        state = self.collect_state()
+        problems = self._collect_problems(state) + self.scenario.problems()
+        if problems:
+            self.scenario.problem.setText("Cannot run: " + problems[0])
+            return
+        from ..core.scenario import ScenarioCancelled, run_scenario
+
+        self._scenario_cancel = False
+        self._scenario_running = True
+        self.scenario.set_running(True)
+        spec = state.scenario
+
+        def work(progress):
+            req = self.backend.build_request(state)
+            try:
+                return run_scenario(req, spec, progress=progress, cancelled=lambda: self._scenario_cancel)
+            except ScenarioCancelled:
+                raise RuntimeError("cancelled") from None
+
+        task = FuncTask(work)
+        task.signals.progress.connect(self.scenario.set_progress)
+        task.signals.finished.connect(self._scenario_done)
+        task.signals.failed.connect(self._scenario_failed)
+        self._tasks.append(task)
+
+        def forget(*_a) -> None:
+            if task in self._tasks:
+                self._tasks.remove(task)
+
+        task.signals.finished.connect(forget)
+        task.signals.failed.connect(forget)
+        self.pool.start(task)  # the analyses' single-thread pool: never two solutions at once
+
+    def _cancel_scenario(self) -> None:
+        self._scenario_cancel = True
+
+    def _scenario_done(self, res) -> None:
+        self._scenario_running = False
+        self.scenario.show_result(res)
+        lof = res.liftoff
+        u = self.scenario.speed_unit()
+        self.results.log("scenario run: " + (f"lift-off at {units.from_si('speed', lof.V, u):.2f} {u}"
+                                             if lof is not None else "no lift-off"))
+
+    def _scenario_failed(self, message: str) -> None:
+        self._scenario_running = False
+        self.scenario.show_error("cancelled" if "cancelled" in message else message)
+
+    def is_scenario_running(self) -> bool:
+        return self._scenario_running
 
     def is_sweeping(self) -> bool:
         return self._sweeping

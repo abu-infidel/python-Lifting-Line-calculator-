@@ -106,5 +106,24 @@
     "slat_y_out": 1.0,
     "slat_chord_extension": 1.1,
     "weight_N": 11342.965118914273
+  },
+  "scenario": {
+    "v_start": 0.0,
+    "v_end": 40.2336,
+    "v_rotate": 26.8224,
+    "alpha_ground_deg": 0.0,
+    "ramp_mode": "target",
+    "ramp_rate_deg_s": 3.0,
+    "ramp_rate_deg_per_mps": 0.75,
+    "ramp_target_deg": 10.0,
+    "mass_kg": 1157.0,
+    "time_model": false,
+    "thrust_static_N": 2400.0,
+    "thrust_end_N": 1800.0,
+    "rolling_friction": 0.02,
+    "ground_effect": false,
+    "ground_height_m": 1.5,
+    "points": 61,
+    "speed_unit": "mph"
   }
 }

@@ -17,6 +17,7 @@ from typing import Any
 from ..core.controls import validate_rows as validate_control_rows
 from ..core.flow import FlowCondition
 from ..core.highlift import LANDING, HighLiftError, HighLiftSystem
+from ..core.scenario import ScenarioSpec
 from ..core.wing import KIND_ELLIPTIC, Section, Wing
 
 SCHEMA_VERSION = 1
@@ -351,6 +352,7 @@ class ProjectState:
     notes: str = ""
     controls: list[dict[str, Any]] = field(default_factory=list)  # control surfaces (see core.controls.ControlSurface)
     high_lift: HighLiftSpec = field(default_factory=HighLiftSpec)
+    scenario: ScenarioSpec = field(default_factory=ScenarioSpec)  # Scenario tab (does not affect the analysis)
 
     def __post_init__(self) -> None:
         self.airfoils.fit(self.wing.n_sections())
@@ -373,6 +375,7 @@ class ProjectState:
             solver=dump(self.solver),
             controls=copy.deepcopy(self.controls),
             high_lift=dump(self.high_lift),
+            scenario=dump(self.scenario),
         )
 
     @classmethod
@@ -400,6 +403,7 @@ class ProjectState:
             notes=str(data.get("notes", "")),
             controls=[dict(c) for c in (data.get("controls") or []) if isinstance(c, dict)],
             high_lift=load(HighLiftSpec, data.get("high_lift") if isinstance(data.get("high_lift"), dict) else None),
+            scenario=load(ScenarioSpec, data.get("scenario") if isinstance(data.get("scenario"), dict) else None),
         )
         state.wing.sync()
         state.airfoils.fit(state.wing.n_sections())
