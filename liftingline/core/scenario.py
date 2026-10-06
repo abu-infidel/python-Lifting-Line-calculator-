@@ -462,20 +462,20 @@ def to_csv(res: ScenarioResult, speed_unit: str | None = None) -> str:
     u = speed_unit or res.spec.speed_unit
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
-    for line in summary_lines(res, u):
-        w.writerow([f"# {line.strip()}"])
+    for line in summary_lines(res, u):  # written raw (not quoted), so readers can skip them: read_csv(comment="#")
+        buf.write("# " + " ".join(line.split()) + "\n")
     keys = [k for k, _l, _u in COLUMNS if not (k in ("t_s", "x_m", "T_N", "F_roll_N", "F_net_N", "a_mps2") and not res.has_time)]
     head = []
     for k in keys:
         head.append(k)
-        if k == "V_mps":
+        if k == "V_mps" and u != "m/s":  # the airspeed also in the chosen unit
             head.append(f"V_{u.replace('/', '_per_')}")
     w.writerow(head)
     for i in range(res.n):
         row = []
         for k in keys:
             row.append(repr(float(res.data[k][i])))
-            if k == "V_mps":
+            if k == "V_mps" and u != "m/s":
                 row.append(repr(_speed(float(res.data[k][i]), u)))
         w.writerow(row)
     return buf.getvalue()

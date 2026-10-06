@@ -14,3 +14,7 @@ PySide6>=6.7
 # back to the fast built-in section engine. Delete these lines for a light install.
 neuralfoil>=0.3.3,<0.4
 aerosandbox>=4.2.7,<4.3
+
+# --- MCP server for AI agents (python -m liftingline mcp) --------------------
+# Optional: only that command needs it. Delete this line if you do not use it.
+mcp>=1.25,<2

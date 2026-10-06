@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 maxfidelity = ["neuralfoil>=0.3.3,<0.4", "aerosandbox>=4.2.7,<4.3"]
+mcp = ["mcp>=1.25,<2"]
 dev = ["pytest>=8.0", "pytest-qt>=4.4"]
 
 [project.scripts]

@@ -12,6 +12,7 @@ Everything runs on your machine. The optional **max-fidelity** airfoil data come
 choose between them with one drop-down.
 
 - [Install](#install) · [Quick start](#quick-start) · [Using the program](#using-the-program) · [Conventions](#conventions)
+- [Scenario: forces along a run](#scenario-forces-along-a-run) · [Command line](#command-line) · [MCP server for AI agents](#mcp-server-for-ai-agents)
 - [How it works](#how-it-works) · [Validation and accuracy](#validation-and-accuracy) · [Limitations](#limitations)
 - [Tools](#tools) · [Development](#development)
 
@@ -23,6 +24,7 @@ You need Python 3.10 or newer. One command installs everything, including the ma
 pip install -r requirements.txt
 python main.py              # the calculator
 python stl_exporter.py      # the separate 3-D model (STL) exporter, also opened from the calculator
+python -m liftingline analyze --example "Cessna 172S"   # no window: the command line (see below)
 ```
 
 The window fits 16:9 screens from 1280 x 720 up (including laptops at 125-150 % display scaling): it sizes itself to the
@@ -113,6 +115,8 @@ The sweep on the right marks the first stall and shows unconverged post-stall po
 * **Polars and stall** - sweep angle of attack, airspeed, altitude, sideslip or a control deflection; angle-of-attack sweeps
   report the first stall (angle, station, CL) and the maximum lift. Export the sweep as CSV.
 * **Trim** (Tools menu) - the angle of attack for a target CL or lift (weight in level flight), or the airspeed for a weight.
+* **Scenario** (toolbar button, also Tools menu) - forces along a run from a start to an end airspeed, such as a takeoff run:
+  when does the lift overcome the weight? See [Scenario](#scenario-forces-along-a-run).
 * **Ideal twist** - the twist that gives your planform an elliptic load (span efficiency 1) at a design CL; it becomes a section
   table and the angle of attack is set for the design lift.
 * **High lift tab** - two toggles: **Deploy trailing-edge flaps** and **Deploy leading-edge slats**, for the takeoff or the
@@ -186,6 +190,76 @@ The window shows the wing's data, a rotatable 3-D preview and the expected size 
 Chordwise points are clustered at the leading and trailing edges; every wing section is a station, and narrow tips get
 proportionally finer steps. Meshing takes well under a second even at *very fine*. The calculator's front and side views use
 the same section geometry as the exporter, so the views show exactly the model you export.
+
+### Scenario: forces along a run
+
+The **Scenario** toolbar button swaps the plots for the Scenario workspace (*Back to the calculator* returns; the calculator's
+inputs, plots and results are untouched, and nothing in the Scenario changes them). It uses the wing, airfoils, altitude,
+high-lift devices and extra drag of the other tabs, and replaces their airspeed and angle of attack by a schedule:
+
+* **Speed range** - start and end airspeed (any speed unit), number of analysis points.
+* **Angle of attack** - constant before the *rotation airspeed*, then rising linearly: to a **target angle at the end speed**, by
+  **degrees per speed unit**, or by **degrees per second** (needs the time model).
+* **Aircraft** - the mass; the weight m g is compared with the lift at every point. **Lift-off** is where the lift first equals the
+  weight (found exactly between the points).
+* **Compute time and distance** (optional takeoff-run model) - static thrust, thrust at the end speed (linear in between) and the
+  rolling-friction coefficient give `m dV/dt = T - D - mu (W - L)` on a level runway without wind: time, distance and
+  acceleration along the run. After lift-off the friction is gone; the climb is not modelled.
+* **Ground effect** - the wing's height above the runway (image vortices).
+
+*Run scenario* computes the run in the background and opens **Results and playback**: forces (lift, weight, drag, thrust), the
+angle of attack, and airspeed and distance against time (or lift/weight against airspeed without the time model), with events
+marked (rotation, lift-off, first section stall, thrust limit). **Play** animates a cursor through the run with live numbers
+(time, airspeed, angle, lift, weight, lift - weight, drag, thrust, acceleration, distance, cl/cl_max, on the ground or lifted off);
+choose the playback speed (0.1x to 10x), drag the slider to any moment, or jump to the lift-off. **Export CSV...** writes every
+point (with `#` comment lines for the inputs and events - `pandas.read_csv(file, comment="#")` reads it), **Export text...** a
+readable report. The scenario settings are saved in the project file.
+
+Example: the Cessna 172S wing at sea level, 0 -> 90 mph, rotation at 60 mph with the angle rising from 0 to 10 deg at 90 mph,
+1157 kg, thrust 2400 N falling to 1800 N, rolling friction 0.02 (built-in section data): lift-off at 81.7 mph, 23.0 s and 447 m
+into the run, at 7.2 deg.
+
+![Scenario playback: takeoff run of the Cessna 172S wing](docs/img/scenario.png)
+
+### Command line
+
+`python -m liftingline` (or `python main.py`) without arguments starts the window, as before. With a command it runs without a
+window and prints a report, JSON (`--format json`) or CSV (`--format csv`), to the terminal or a file (`-o`):
+
+```bash
+python -m liftingline examples                                          # the example wings
+python -m liftingline analyze --example "Cessna 172S" --speed 100 --speed-unit kt --alpha 2 --altitude-ft 5000
+python -m liftingline analyze my_wing.json --format json -o result.json   # a project saved with File > Save
+python -m liftingline sweep -e rectangular --variable alpha --start -4 --stop 16 -n 11 --format csv -o polar.csv
+python -m liftingline max-lift -e "Cessna 172S" --flaps --mass 1157          # CL_max, stall speed, flaps up and down
+python -m liftingline trim -e "Cessna 172S" --mass 1157 --speed 110 --speed-unit kt
+python -m liftingline scenario -e "Cessna 172S" --altitude 0 --speed-unit mph --v-end 90 --v-rotate 60 --target 10 \
+    --mass 1157 --time-model --thrust-static 2400 --thrust-end 1800 --format csv -o takeoff.csv
+python -m liftingline stl -e sailplane --stl sailplane.stl --quality fine --unit mm
+python -m liftingline compare-aircraft          # the program against Cessna 172S / 152 handbook data
+python -m liftingline validate --format json    # the self-test (exit code 1 on a failure)
+```
+
+Every command takes a project file or `--example`, and the overrides `--alpha`, `--speed` / `--speed-unit` or `--mach`,
+`--altitude` (m) or `--altitude-ft`, `--beta`, `--ground-height`, `--extra-cd0`, `--engine builtin|neuralfoil`,
+`--solver classical|numerical`, `--flaps`, `--slats`, `--high-lift-setting takeoff|landing`. `python -m liftingline <command>
+--help` lists all options. The JSON formats are described in [README_FOR_CLAUDE.md](README_FOR_CLAUDE.md).
+
+### MCP server for AI agents
+
+`python -m liftingline mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io) server on stdio, so an AI agent
+such as Claude can use the calculator as a set of tools: `list_examples`, `describe_project`, `analyze_wing`, `sweep`,
+`max_lift`, `trim`, `run_scenario`, `compare_real_aircraft`, `export_stl`, `self_test`, `get_documentation`. Results are JSON in
+SI units. It needs the `mcp` package (in `requirements.txt`). To add it to Claude Code:
+
+```bash
+claude mcp add --transport stdio --env PYTHONPATH=/path/to/this/folder liftingline -- /path/to/python -m liftingline mcp
+```
+
+or, for Claude Desktop and other clients, an `mcpServers` entry with `"command": "/path/to/python"`,
+`"args": ["-m", "liftingline", "mcp"]` and `"env": {"PYTHONPATH": "/path/to/this/folder"}`.
+[README_FOR_CLAUDE.md](README_FOR_CLAUDE.md) is the agent's manual (also served by the server itself): every output field, its
+unit and sign convention, and how to call each tool.
 
 ## Conventions
 
@@ -307,7 +381,8 @@ stall it comes out a few per cent *above* the airplane (tail download, fuselage,
 
 ## Tools
 
-* `python -m liftingline --validate` - the self-test. `python -m liftingline --version`.
+* `python -m liftingline --validate` - the self-test. `python -m liftingline --version`. Commands without a window:
+  [Command line](#command-line); AI agents: [MCP server](#mcp-server-for-ai-agents).
 * `python tools/check_library.py /path/to/uiuc --resolve 63-412 64A010` - indexes your airfoil folder, parses every file, reports formats,
   repairs and failures, and shows which file each 6-series code resolves to. Also available in the program (*Library health check*).
 * `python tools/calibrate_builtin.py` - regenerates the built-in engine's calibration against NeuralFoil.
@@ -322,5 +397,7 @@ pytest                      # headless: the GUI tests run with QT_QPA_PLATFORM=o
 
 Layout: `liftingline/core` (physics: atmosphere, wing, both solvers, forces, sweeps, trim, controls, validation), `liftingline/airfoil`
 (designations, NACA generators, `.dat` parsing, panel method, library, section engines), `liftingline/io` (project state, backend,
-reports, examples), `liftingline/gui` (PySide6 window and plots). `core`, `airfoil` and `io` do not import Qt; the window is a thin
-layer over `liftingline.core.analysis.run`.
+reports, examples), `liftingline/gui` (PySide6 window and plots), `liftingline/api.py` (one function per task with JSON-ready
+results, used by the command line `liftingline/__main__.py` and the MCP server `liftingline/mcp_server.py`). `core`, `airfoil`,
+`io`, the API and the MCP server do not import Qt; the window is a thin layer over `liftingline.core.analysis.run`.
+`tests/test_golden.py` pins every example's results to 1e-12, so a change that alters the calculator's numbers cannot slip in.
